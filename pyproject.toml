@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jose-humanoid"
+version = "0.1.0"
+description = "Standalone JOSE G1 AMP, estimation, and history-distillation tasks for Isaac Lab"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+]
+
+[tool.setuptools]
+packages = ["jose", "jose.agents", "jose.distillation", "jose.estimator", "jose.motions", "jose.tools"]
+
+[tool.setuptools.package-dir]
+jose = "."
+"jose.agents" = "agents"
+"jose.distillation" = "distillation"
+"jose.estimator" = "estimator"
+"jose.motions" = "motions"
+"jose.tools" = "tools"
+
+[tool.setuptools.package-data]
+jose = [
+  "agents/*.yaml",
+  "motions/*.npz",
+  "usd/**/*",
+]
