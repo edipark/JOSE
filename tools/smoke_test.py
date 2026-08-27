@@ -40,8 +40,8 @@ def main():
     cfg = parse_env_cfg(task, device=args.device, num_envs=args.num_envs)
     env = gym.make(task, cfg=cfg)
     observations, _ = env.reset()
-    assert abs(env.unwrapped.step_dt - 1.0 / 30.0) < 1.0e-9
-    assert env.unwrapped.max_episode_length == 600
+    assert abs(env.unwrapped.step_dt - 1.0 / 50.0) < 1.0e-9
+    assert env.unwrapped.max_episode_length == 1000
     if task.startswith("Isaac-G1-AMP"):
         assert env.unwrapped.amp_observation_space.shape == (404,)
     assert env.unwrapped.sim.stage.GetPrimAtPath("/World/ground").IsValid()

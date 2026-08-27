@@ -6,10 +6,12 @@ import numpy as np
 import torch
 
 
-# These values intentionally match the current SOLO task.
-PHYSICS_DT = 1.0 / 120.0
+# Unitree's G1 RL/deployment stack uses 200 Hz physics with a 50 Hz policy.
+PHYSICS_DT = 1.0 / 200.0
 CONTROL_DECIMATION = 4
 POLICY_DT = PHYSICS_DT * CONTROL_DECIMATION
+# AMP references are sampled as independent states rather than phase-tracked
+# trajectories, so all motion tasks intentionally share a 20-second episode.
 EPISODE_LENGTH_S = 20.0
 AMP_HISTORY_STEPS = 4
 WALK_TARGET_VELOCITY = 0.6
@@ -40,6 +42,21 @@ def normalized_action_to_position(
 ) -> torch.Tensor:
     """Clip normalized actions and map them into soft joint-position limits."""
     return offset + scale * clip_normalized_actions(actions)
+
+
+def action_finite_difference_penalties(
+    actions: torch.Tensor,
+    previous_actions: torch.Tensor,
+    previous_previous_actions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-sample first- and second-order squared action differences."""
+    if actions.shape != previous_actions.shape or actions.shape != previous_previous_actions.shape:
+        raise ValueError("Current and historical action tensors must have identical shapes")
+    action_rate = (actions - previous_actions).square().mean(dim=-1)
+    action_second_difference = (
+        actions - 2.0 * previous_actions + previous_previous_actions
+    ).square().mean(dim=-1)
+    return action_rate, action_second_difference
 
 
 def inject_observation_estimate(

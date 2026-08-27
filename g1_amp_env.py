@@ -16,6 +16,7 @@ from .g1_amp_env_cfg import G1AmpEnvCfg
 from .motions.motion_loader import MotionLoader
 from .schema import G1_JOINT_NAMES, G1_KEY_BODY_NAMES
 from .task_math import (
+    action_finite_difference_penalties,
     normalized_action_to_position,
     reference_history_times,
     soft_limit_action_parameters,
@@ -32,12 +33,15 @@ class G1AmpEnv(DirectRLEnv):
         )
         self.actions = torch.zeros((self.num_envs, 29), device=self.device)
         self.previous_actions = torch.zeros_like(self.actions)
+        self.previous_previous_actions = torch.zeros_like(self.actions)
+        self._action_history_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
 
         self._motion_loader = MotionLoader(
             self.cfg.motion_file,
             self.device,
             expected_dof_names=G1_JOINT_NAMES,
-            speed_scale=self.cfg.motion_speed_scale,
         )
         self.ref_body_index = self.robot.data.body_names.index(self.cfg.reference_body)
         self.key_body_indexes = [self.robot.data.body_names.index(name) for name in G1_KEY_BODY_NAMES]
@@ -83,8 +87,10 @@ class G1AmpEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self.previous_previous_actions.copy_(self.previous_actions)
         self.previous_actions.copy_(self.actions)
         self.actions = actions.clone()
+        self._action_history_count.clamp_max_(2).add_(1)
 
     def _apply_action(self):
         self.robot.set_joint_position_target(
@@ -144,8 +150,21 @@ class G1AmpEnv(DirectRLEnv):
         velocity_reward = torch.exp(
             -self.cfg.velocity_tracking_coeff * (vx - self.cfg.target_velocity).square()
         )
-        raw_task = self.cfg.velocity_reward_weight * velocity_reward
-        action_rate = (self.actions - self.previous_actions).square().mean(dim=-1)
+        action_rate, action_second_difference = action_finite_difference_penalties(
+            self.actions, self.previous_actions, self.previous_previous_actions
+        )
+        action_second_difference = action_second_difference * (
+            self._action_history_count >= 3
+        ).to(action_second_difference.dtype)
+        action_rate_penalty = self.cfg.action_rate_penalty_weight * action_rate
+        action_second_difference_penalty = (
+            self.cfg.action_second_difference_penalty_weight * action_second_difference
+        )
+        raw_task = (
+            self.cfg.velocity_reward_weight * velocity_reward
+            - action_rate_penalty
+            - action_second_difference_penalty
+        )
         effort_limits = self.robot.data.joint_effort_limits
         saturation_fraction = (
             self.robot.data.computed_torque.abs() >= effort_limits - 1.0e-5
@@ -155,8 +174,17 @@ class G1AmpEnv(DirectRLEnv):
             **previous_log,
             "reward/raw_task": raw_task.mean().detach(),
             "reward/velocity_tracking": velocity_reward.mean().detach(),
-            "reward/velocity_tracking_weighted": raw_task.mean().detach(),
+            "reward/velocity_tracking_weighted": (
+                self.cfg.velocity_reward_weight * velocity_reward.mean()
+            ).detach(),
+            "reward/action_rate_penalty": action_rate.mean().detach(),
+            "reward/action_rate_penalty_weighted": action_rate_penalty.mean().detach(),
+            "reward/action_second_difference_penalty": action_second_difference.mean().detach(),
+            "reward/action_second_difference_penalty_weighted": (
+                action_second_difference_penalty.mean()
+            ).detach(),
             "metric/action_rate": action_rate.mean().detach(),
+            "metric/action_second_difference": action_second_difference.mean().detach(),
             "metric/base_vel_x": vx.mean().detach(),
             "metric/base_height": height.mean().detach(),
             "metric/joint_velocity_squared": self.robot.data.joint_vel.square().mean().detach(),
@@ -169,11 +197,6 @@ class G1AmpEnv(DirectRLEnv):
         if self.cfg.early_termination:
             too_low = self.robot.data.body_pos_w[:, self.ref_body_index, 2] < self.cfg.termination_height
             vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
-            too_slow_instant = (
-                vx < self.cfg.termination_min_vel_x
-                if self.cfg.termination_min_vel_x > 0.0
-                else torch.zeros_like(too_low)
-            )
             if self.cfg.vel_window_min_vx > 0.0:
                 write_index = self.episode_length_buf % self.cfg.vel_window_steps
                 env_index = torch.arange(self.num_envs, device=self.device)
@@ -183,7 +206,7 @@ class G1AmpEnv(DirectRLEnv):
                 too_slow_window = window_full & (self._vel_window_buf.mean(dim=1) < self.cfg.vel_window_min_vx)
             else:
                 too_slow_window = torch.zeros_like(too_low)
-            died = too_low | too_slow_instant | too_slow_window
+            died = too_low | too_slow_window
         else:
             died = torch.zeros_like(time_out)
         log = self.extras.setdefault("log", {})
@@ -253,6 +276,8 @@ class G1AmpEnv(DirectRLEnv):
             raise ValueError(f"Unknown reset strategy: {self.cfg.reset_strategy}")
         self.actions[env_ids] = 0.0
         self.previous_actions[env_ids] = 0.0
+        self.previous_previous_actions[env_ids] = 0.0
+        self._action_history_count[env_ids] = 0
         self.robot.write_root_link_pose_to_sim(root_state[:, :7], env_ids)
         self.robot.write_root_com_velocity_to_sim(root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)

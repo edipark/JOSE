@@ -72,7 +72,7 @@ agent:
   value_loss_scale: 2.5
   discriminator_loss_scale: 6.0
   amp_batch_size: 512
-  # SOLO walk combines velocity tracking with AMP style reward.
+  # JOSE walk combines velocity tracking and anti-jitter task terms with AMP style reward.
   task_reward_scale: 0.5
   style_reward_scale: 2.0
   discriminator_batch_size: 4096
@@ -88,5 +88,5 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 80000
+  timesteps: 200000
   environment_info: log

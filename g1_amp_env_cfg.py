@@ -29,11 +29,9 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 
     early_termination = True
     termination_height = 0.55
-    termination_min_vel_x = 0.0
     vel_window_min_vx = 0.0
     vel_window_steps = 10
     motion_file: str = MISSING
-    motion_speed_scale = 1.0
     reference_body = "pelvis"
     reset_strategy = "random"
 
@@ -42,6 +40,10 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     target_velocity = 0.6
     velocity_tracking_coeff = 2.0
     velocity_reward_weight = 0.0
+    # mean((action[t] - action[t - 1]) ** 2) across joints.
+    action_rate_penalty_weight = 0.0
+    # mean((action[t] - 2 * action[t - 1] + action[t - 2]) ** 2) across joints.
+    action_second_difference_penalty_weight = 0.0
 
     sim: SimulationCfg = SimulationCfg(
         dt=PHYSICS_DT,
@@ -56,6 +58,8 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
 class G1AmpWalkEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_walk.npz")
     velocity_reward_weight = 0.5
+    action_rate_penalty_weight = 0.0
+    action_second_difference_penalty_weight = 0.1
 
 
 @configclass

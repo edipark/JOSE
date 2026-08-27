@@ -112,26 +112,37 @@ def test_reference_motions_have_the_same_joint_set():
         assert set(names) == set(schema.G1_JOINT_NAMES)
 
 
-def test_motion_speed_scale_updates_timing_and_velocities():
-    motion_path = JOSE_DIR / "motions" / "G1_walk.npz"
-    nominal = motion_loader.MotionLoader(str(motion_path), torch.device("cpu"), speed_scale=1.0)
-    faster = motion_loader.MotionLoader(str(motion_path), torch.device("cpu"), speed_scale=2.0)
-    assert faster.duration == pytest.approx(nominal.duration / 2.0)
-    assert torch.allclose(faster.dof_velocities, nominal.dof_velocities * 2.0)
-    assert torch.allclose(faster.body_linear_velocities, nominal.body_linear_velocities * 2.0)
-
-
-def test_solo_aligned_timing_and_amp_history():
+def test_motion_loader_preserves_recorded_timing_and_velocities():
     import numpy as np
 
-    assert task_math.PHYSICS_DT == pytest.approx(1.0 / 120.0)
+    motion_path = JOSE_DIR / "motions" / "G1_walk.npz"
+    data = np.load(motion_path)
+    motion = motion_loader.MotionLoader(str(motion_path), torch.device("cpu"))
+    assert motion.dt == pytest.approx(1.0 / float(data["fps"]))
+    assert torch.equal(
+        motion.dof_velocities, torch.as_tensor(data["dof_velocities"], dtype=torch.float32)
+    )
+    assert torch.equal(
+        motion.body_linear_velocities,
+        torch.as_tensor(data["body_linear_velocities"], dtype=torch.float32),
+    )
+    assert torch.equal(
+        motion.body_angular_velocities,
+        torch.as_tensor(data["body_angular_velocities"], dtype=torch.float32),
+    )
+
+
+def test_g1_timing_and_amp_history():
+    import numpy as np
+
+    assert task_math.PHYSICS_DT == pytest.approx(1.0 / 200.0)
     assert task_math.CONTROL_DECIMATION == 4
-    assert task_math.POLICY_DT == pytest.approx(1.0 / 30.0)
-    assert task_math.EPISODE_LENGTH_S / task_math.POLICY_DT == pytest.approx(600)
+    assert task_math.POLICY_DT == pytest.approx(1.0 / 50.0)
+    assert task_math.EPISODE_LENGTH_S / task_math.POLICY_DT == pytest.approx(1000)
     assert task_math.AMP_HISTORY_STEPS * schema.AMP_OBSERVATION_SCHEMA.policy_dim == 404
     times = task_math.reference_history_times(np.array([1.0])).reshape(1, -1)
     assert times.shape == (1, 4)
-    assert np.diff(times[0]) == pytest.approx([-1.0 / 30.0] * 3)
+    assert np.diff(times[0]) == pytest.approx([-1.0 / 50.0] * 3)
 
 
 def test_solo_action_mapping_clips_and_uses_half_joint_range():
@@ -142,6 +153,17 @@ def test_solo_action_mapping_clips_and_uses_half_joint_range():
     actions = torch.tensor([[-2.0, 0.25], [1.0, 3.0]])
     targets = task_math.normalized_action_to_position(actions, offset, scale)
     assert torch.equal(targets, torch.tensor([[-2.0, 0.75], [4.0, 1.5]]))
+
+
+def test_action_finite_difference_penalties():
+    previous_previous = torch.tensor([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
+    previous = torch.tensor([[1.0, 1.0, 1.0], [2.0, 4.0, 6.0]])
+    current = torch.tensor([[3.0, 1.0, -1.0], [4.0, 8.0, 12.0]])
+    action_rate, action_second_difference = task_math.action_finite_difference_penalties(
+        current, previous, previous_previous
+    )
+    assert torch.allclose(action_rate, torch.tensor([8.0 / 3.0, 56.0 / 3.0]))
+    assert torch.allclose(action_second_difference, torch.tensor([11.0 / 3.0, 14.0 / 3.0]))
 
 
 def test_solo_policy_model_leaves_clipping_to_environment():
@@ -386,15 +408,25 @@ def test_rollout_diagnostics_npz_and_plot(tmp_path):
 def test_amp_environment_and_implicit_actuator_source():
     env_source = (JOSE_DIR / "g1_amp_env_cfg.py").read_text(encoding="utf-8")
     env_impl_source = (JOSE_DIR / "g1_amp_env.py").read_text(encoding="utf-8")
+    loader_source = (JOSE_DIR / "motions" / "motion_loader.py").read_text(encoding="utf-8")
     robot_source = (JOSE_DIR / "g1_cfg.py").read_text(encoding="utf-8")
     assert 'reset_strategy = "random"' in env_source
     assert "vel_window_min_vx" in env_source
-    assert "termination_min_vel_x" in env_source
+    assert "termination_min_vel_x" not in env_source
+    assert "motion_speed_scale" not in env_source
+    assert "speed_scale" not in loader_source
+    assert "too_slow_instant" not in env_impl_source
     assert "upright_weight" not in env_source
     assert "height_weight" not in env_source
     assert "target_velocity" in env_source
     assert "velocity_reward_weight = 0.5" in env_source
+    assert "action_rate_penalty_weight = 0.05" in env_source
+    assert "action_second_difference_penalty_weight = 0.01" in env_source
     assert "velocity_reward = torch.exp" in env_impl_source
+    assert "previous_previous_actions" in env_impl_source
+    assert "action_finite_difference_penalties" in env_impl_source
+    assert '"reward/action_rate_penalty_weighted"' in env_impl_source
+    assert '"reward/action_second_difference_penalty_weighted"' in env_impl_source
     assert "env_spacing=4.0" in env_source
     assert "GroundPlaneCfg" in env_impl_source
     assert "spawn_ground_plane" in env_impl_source
@@ -424,7 +456,8 @@ def test_skrl_2_yaml_and_style_scale():
             assert config["models"]["policy"]["min_log_std"] == pytest.approx(-3.5)
             assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
             assert config["models"]["policy"]["fixed_log_std"] is False
-            assert config["trainer"]["timesteps"] == 80000
+            expected_timesteps = 200000 if path.name == "skrl_g1_walk_amp_cfg.yaml" else 80000
+            assert config["trainer"]["timesteps"] == expected_timesteps
             expected_task_scale = 0.5 if "walk_amp" in path.name else 0.0
             assert config["agent"]["task_reward_scale"] == pytest.approx(expected_task_scale)
             assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)

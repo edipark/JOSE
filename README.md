@@ -6,7 +6,7 @@ JOSE is a standalone Isaac Lab package: task modules, motions, assets, train/pla
 live directly in the installable `jose` package. It trains 29-DOF Unitree G1 walk,
 dance, and jump policies with an
 [Adversarial Motion Prior (AMP)](https://xbpeng.github.io/projects/AMP/), then replaces policy-only base information
-with a learned state estimator. Its current AMP teacher and robot configuration mirror the local SOLO task, while
+with a learned state estimator. Its AMP objective and robot configuration derive from the local SOLO task, while
 the original G1 assets and reference motions derive from
 [`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp). All task code, assets, motions, estimator code,
 tools, and tests are physically contained here; it is not an IsaacLab fork and no external research repository is
@@ -30,17 +30,19 @@ python -c "import jose; print('JOSE tasks registered')"
 
 Train an AMP walk, dance, or jump teacher with the 101D G1 motion observation. Walk and Dance mirror the current
 SOLO implementation: clipped half-range joint actions, SOLO implicit actuators, trainable Gaussian exploration from
-`log_std=-1.2`, and the same policy/value/discriminator networks. Walk combines velocity tracking
+`log_std=-1.2`, and the same policy/value/discriminator networks. Walk combines velocity tracking with first- and
+second-order finite-difference action penalties
 (`task_reward_scale: 0.5`) with AMP style reward (`style_reward_scale: 2.0`); Dance and Jump use only the style term.
-Physics runs at 120 Hz with decimation 4 (30 Hz policy control). The discriminator receives four policy-rate AMP
-frames (4 x 101D = 404D), and episodes last 20 seconds. JOSE's estimator, distillation, metrics, and replay interfaces
+Physics runs at 200 Hz with decimation 4 (50 Hz policy control), matching Unitree's G1 RL/deployment timing. The
+discriminator receives four policy-rate AMP frames (4 x 101D = 404D), and episodes last 20 seconds. JOSE's estimator,
+distillation, metrics, and replay interfaces
 are layered on this teacher without changing its AMP objective.
 
 ```bash
 # Walk AMP
 python -m jose.train \
   --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 --algorithm AMP \
-  --experiment_name solo_aligned --headless
+  --experiment_name amp_walk --headless
 
 # Video also writes action/position/torque diagnostics next to the recording
 python -m jose.play \
