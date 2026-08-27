@@ -73,7 +73,7 @@ agent:
   discriminator_loss_scale: 6.0
   amp_batch_size: 512
   # Pure AMP: the environment task reward and its scale are both zero.
-  task_reward_scale: 0.0
+  task_reward_scale: 0.5
   style_reward_scale: 2.0
   discriminator_batch_size: 4096
   discriminator_logit_regularization_scale: 0.05
@@ -88,5 +88,5 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 80000
+  timesteps: 10000
   environment_info: log
