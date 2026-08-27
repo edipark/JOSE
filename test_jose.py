@@ -11,6 +11,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -145,14 +146,12 @@ def test_g1_timing_and_amp_history():
     assert np.diff(times[0]) == pytest.approx([-1.0 / 50.0] * 3)
 
 
-def test_solo_action_mapping_clips_and_uses_half_joint_range():
-    limits = torch.tensor([[-2.0, 4.0], [-0.5, 1.5]])
-    offset, scale = task_math.soft_limit_action_parameters(limits)
-    assert torch.equal(offset, torch.tensor([1.0, 0.5]))
-    assert torch.equal(scale, torch.tensor([3.0, 1.0]))
+def test_twist_action_mapping_uses_default_pose_scale_and_soft_limits():
+    limits = torch.tensor([[-1.0, 1.0], [0.0, 1.5]])
+    defaults = torch.tensor([-0.2, 0.4])
     actions = torch.tensor([[-2.0, 0.25], [1.0, 3.0]])
-    targets = task_math.normalized_action_to_position(actions, offset, scale)
-    assert torch.equal(targets, torch.tensor([[-2.0, 0.75], [4.0, 1.5]]))
+    targets = task_math.twist_action_to_position(actions, defaults, limits)
+    assert torch.allclose(targets, torch.tensor([[-1.0, 0.525], [0.3, 1.5]]))
 
 
 def test_action_finite_difference_penalties():
@@ -166,7 +165,14 @@ def test_action_finite_difference_penalties():
     assert torch.allclose(action_second_difference, torch.tensor([11.0 / 3.0, 14.0 / 3.0]))
 
 
-def test_solo_policy_model_leaves_clipping_to_environment():
+def test_twist_action_mapping_rejects_invalid_scale():
+    with pytest.raises(ValueError, match="positive"):
+        task_math.twist_action_to_position(
+            torch.zeros(1), torch.zeros(1), torch.tensor([[-1.0, 1.0]]), action_scale=0.0
+        )
+
+
+def test_policy_model_does_not_preclip_twist_actions():
     for path in (JOSE_DIR / "agents").glob("*.yaml"):
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert config["models"]["policy"]["clip_actions"] is False
@@ -393,7 +399,8 @@ def test_rollout_diagnostics_npz_and_plot(tmp_path):
     )
     core = SimpleNamespace(
         action_offset=torch.zeros(joint_count),
-        action_scale=torch.ones(joint_count),
+        action_scale=torch.full((joint_count,), 0.5),
+        action_soft_limits=torch.tensor([[-0.75, 0.75]] * joint_count),
         robot=SimpleNamespace(data=data),
     )
     recorder = rollout_diagnostics.RolloutDiagnostics(core)
@@ -403,6 +410,9 @@ def test_rollout_diagnostics_npz_and_plot(tmp_path):
     assert Path(artifacts["plot"]).is_file()
     assert len(artifacts["joint_plots"]) == joint_count
     assert all(Path(path).is_file() for path in artifacts["joint_plots"])
+    saved = np.load(artifacts["data"])
+    assert np.array_equal(saved["action_applied"][0], np.array([2.0, 0.0, -2.0]))
+    assert np.array_equal(saved["position_target"][0], np.array([0.75, 0.0, -0.75]))
 
 
 def test_amp_environment_and_implicit_actuator_source():
@@ -420,8 +430,8 @@ def test_amp_environment_and_implicit_actuator_source():
     assert "height_weight" not in env_source
     assert "target_velocity" in env_source
     assert "velocity_reward_weight = 0.5" in env_source
-    assert "action_rate_penalty_weight = 0.05" in env_source
-    assert "action_second_difference_penalty_weight = 0.01" in env_source
+    assert "action_rate_penalty_weight = 0.0" in env_source
+    assert "action_second_difference_penalty_weight = 0.1" in env_source
     assert "velocity_reward = torch.exp" in env_impl_source
     assert "previous_previous_actions" in env_impl_source
     assert "action_finite_difference_penalties" in env_impl_source
@@ -431,10 +441,16 @@ def test_amp_environment_and_implicit_actuator_source():
     assert "GroundPlaneCfg" in env_impl_source
     assert "spawn_ground_plane" in env_impl_source
     assert "DCMotorCfg" not in robot_source
+    assert "action_scale = TWIST_ACTION_SCALE" in env_source
+    assert "twist_action_to_position" in env_impl_source
     assert 'effort_limit_sim={".*_hip_.*": 88.0, ".*_knee_joint": 139.0}' in robot_source
     assert "effort_limit_sim=50.0" in robot_source
-    assert "stiffness=5000.0" in robot_source
-    assert "stiffness=3000.0" in robot_source
+    assert 'stiffness={".*_hip_.*": 100.0, ".*_knee_joint": 150.0}' in robot_source
+    assert 'damping={".*_hip_.*": 2.0, ".*_knee_joint": 4.0}' in robot_source
+    assert "stiffness=150.0" in robot_source
+    assert "damping=4.0" in robot_source
+    assert '".*_wrist_.*": 20.0' in robot_source
+    assert '".*_wrist_.*": 1.0' in robot_source
 
 
 def test_skrl_2_yaml_and_style_scale():

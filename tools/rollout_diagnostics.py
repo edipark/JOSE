@@ -49,8 +49,14 @@ class RolloutDiagnostics:
             return
         index = min(max(self.env_index, 0), actions.shape[0] - 1)
         action = actions[index].detach().float()
-        applied_action = action.clamp(-1.0, 1.0)
-        target = self.core.action_offset + self.core.action_scale * applied_action
+        applied_action = action
+        if hasattr(self.core, "action_to_joint_position"):
+            target = self.core.action_to_joint_position(applied_action)
+        else:
+            target = self.core.action_offset + self.core.action_scale * applied_action
+            if hasattr(self.core, "action_soft_limits"):
+                lower, upper = self.core.action_soft_limits.unbind(dim=-1)
+                target = torch.maximum(torch.minimum(target, upper), lower)
         data = self.core.robot.data
         values = {
             "action_raw": action,
@@ -127,7 +133,7 @@ class RolloutDiagnostics:
             )
             position_axis.set_title(str(joint_name))
             position_axis.set_ylabel("position [rad]")
-            action_axis.set_ylabel("normalized action")
+            action_axis.set_ylabel("raw policy action")
             position_axis.grid(alpha=0.25)
             position_axis.legend(loc="upper left")
             action_axis.legend(loc="upper right")

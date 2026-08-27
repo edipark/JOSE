@@ -6,8 +6,9 @@ JOSE is a standalone Isaac Lab package: task modules, motions, assets, train/pla
 live directly in the installable `jose` package. It trains 29-DOF Unitree G1 walk,
 dance, and jump policies with an
 [Adversarial Motion Prior (AMP)](https://xbpeng.github.io/projects/AMP/), then replaces policy-only base information
-with a learned state estimator. Its AMP objective and robot configuration derive from the local SOLO task, while
-the original G1 assets and reference motions derive from
+with a learned state estimator. Its AMP objective mirrors the local SOLO task, while its policy-to-actuator interface
+uses TWIST-style default-centered actions and PD gains. The
+original G1 assets and reference motions derive from
 [`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp). All task code, assets, motions, estimator code,
 tools, and tests are physically contained here; it is not an IsaacLab fork and no external research repository is
 imported or used at runtime.
@@ -28,10 +29,12 @@ python -c "import jose; print('JOSE tasks registered')"
 
 ### Phase 1 — privileged policy
 
-Train an AMP walk, dance, or jump teacher with the 101D G1 motion observation. Walk and Dance mirror the current
-SOLO implementation: clipped half-range joint actions, SOLO implicit actuators, trainable Gaussian exploration from
-`log_std=-1.2`, and the same policy/value/discriminator networks. Walk combines velocity tracking with first- and
-second-order finite-difference action penalties
+Train an AMP walk, dance, or jump teacher with the 101D G1 motion observation. The AMP objective follows SOLO, while
+joint targets use `q_target = q_default + 0.5 * action` and TWIST PD gains. Final targets are clamped to each joint's
+soft limit; raw policy actions are not clipped to `[-1, 1]`. JOSE retains all 29 actions, including the wrists, rather
+than adopting TWIST's 23-action interface with fixed wrists. The policy uses trainable Gaussian exploration from
+`log_std=-1.2`, and the same policy/value/discriminator networks. Walk combines velocity tracking with a
+second-order finite-difference action penalty
 (`task_reward_scale: 0.5`) with AMP style reward (`style_reward_scale: 2.0`); Dance and Jump use only the style term.
 Physics runs at 200 Hz with decimation 4 (50 Hz policy control), matching Unitree's G1 RL/deployment timing. The
 discriminator receives four policy-rate AMP frames (4 x 101D = 404D), and episodes last 20 seconds. JOSE's estimator,
@@ -57,7 +60,7 @@ python -m jose.train \
 python -m jose.train \
   --task Isaac-G1-AMP-Jump-JOSE-Direct-v0 --algorithm AMP --headless
 
-# Development audit against the source checkout (not a runtime dependency)
+# Development audit of the shared AMP objective/assets (TWIST action/PD differences are excluded)
 python -m jose.tools.check_solo_amp_parity \
   --reference /home/usd/jose_ws/SOLO
 

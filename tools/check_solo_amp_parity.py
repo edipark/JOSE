@@ -1,7 +1,8 @@
-"""Audit JOSE's AMP training core against the current SOLO checkout.
+"""Audit JOSE's shared AMP objective and assets against the current SOLO checkout.
 
 The audit is development-only. JOSE never reads SOLO during training, play,
-estimation, or deployment.
+estimation, or deployment. JOSE's TWIST-style action mapping, default pose,
+and PD gains are intentional differences and are excluded from this audit.
 """
 
 from __future__ import annotations
@@ -17,10 +18,8 @@ import yaml
 JOSE_ROOT = Path(__file__).resolve().parents[1]
 SOLO_TASK_RELATIVE = Path("source/isaaclab_tasks/isaaclab_tasks/direct/SOLO")
 ENV_METHODS = (
-    "__init__",
     "_setup_scene",
     "_pre_physics_step",
-    "_apply_action",
     "_current_amp_observation",
     "get_estimator_target",
     "get_estimator_joint_state",
@@ -34,9 +33,6 @@ ENV_METHODS = (
 )
 ENV_FUNCTIONS = ("quaternion_to_tangent_and_normal", "compute_amp_observation")
 TASK_MATH_FUNCTIONS = (
-    "clip_normalized_actions",
-    "soft_limit_action_parameters",
-    "normalized_action_to_position",
     "inject_observation_estimate",
     "reference_history_times",
 )
@@ -47,7 +43,6 @@ TASK_MATH_CONSTANTS = (
     "EPISODE_LENGTH_S",
     "AMP_HISTORY_STEPS",
     "WALK_TARGET_VELOCITY",
-    "NORMALIZED_ACTION_LIMIT",
 )
 
 
@@ -96,11 +91,11 @@ def _assert_task_math(reference: Path, target: Path) -> None:
     source_assignments, target_assignments = _assignments(source_tree.body), _assignments(target_tree.body)
     for name in TASK_MATH_CONSTANTS:
         if not _same_ast(source_assignments[name], target_assignments[name]):
-            raise AssertionError(f"SOLO timing/action constant differs: {name}")
+            raise AssertionError(f"SOLO timing constant differs: {name}")
     source_functions, target_functions = _functions(source_tree.body), _functions(target_tree.body)
     for name in TASK_MATH_FUNCTIONS:
         if not _same_ast(source_functions[name], target_functions[name]):
-            raise AssertionError(f"SOLO timing/action helper differs: {name}")
+            raise AssertionError(f"SOLO shared helper differs: {name}")
 
 
 def _assert_env_cfg(reference: Path, target: Path) -> None:
@@ -111,25 +106,6 @@ def _assert_env_cfg(reference: Path, target: Path) -> None:
         for name, value in source.items():
             if name not in actual or not _same_ast(value, actual[name]):
                 raise AssertionError(f"SOLO environment config differs: {class_name}.{name}")
-
-
-class _NormalizeConfig(ast.NodeTransformer):
-    def visit_Call(self, node: ast.Call) -> ast.AST:
-        self.generic_visit(node)
-        for keyword in node.keywords:
-            if keyword.arg == "usd_path":
-                keyword.value = ast.Constant(value="<local copied G1 USD>")
-        node.keywords.sort(key=lambda item: item.arg or "")
-        return node
-
-
-def _assert_robot(reference: Path, target: Path) -> None:
-    source = _assignments(_tree(reference).body)["G1_SOLO_CFG"]
-    actual = _assignments(_tree(target).body)["G1_SOLO_CFG"]
-    source = _NormalizeConfig().visit(source)
-    actual = _NormalizeConfig().visit(actual)
-    if not _same_ast(source, actual):
-        raise AssertionError("SOLO G1 articulation/actuator configuration differs")
 
 
 def _assert_agent(reference: Path, target: Path) -> None:
@@ -160,21 +136,20 @@ def main() -> None:
     _assert_env(task / "g1_amp_env.py", JOSE_ROOT / "g1_amp_env.py")
     _assert_task_math(task / "task_math.py", JOSE_ROOT / "task_math.py")
     _assert_env_cfg(task / "g1_amp_env_cfg.py", JOSE_ROOT / "g1_amp_env_cfg.py")
-    _assert_robot(task / "g1_robot_cfg.py", JOSE_ROOT / "g1_cfg.py")
     for task_name in ("walk", "dance"):
         name = f"skrl_g1_{task_name}_amp_cfg.yaml"
         _assert_agent(task / "agents" / name, JOSE_ROOT / "agents" / name)
     for relative in (
         "motions/G1_walk.npz",
         "motions/G1_dance.npz",
-        "motions/G1_jump.npz",
         "assets/g1_29dof_rev_1_0.usd",
     ):
         target_relative = relative.replace("assets/", "usd/")
         if _sha256(task / relative) != _sha256(JOSE_ROOT / target_relative):
             raise AssertionError(f"SOLO asset differs byte-for-byte: {relative}")
 
-    print("PASS: SOLO AMP core, timing, action mapping, rewards, robot, agents, motions, and USD match")
+    print("PASS: SOLO AMP objective, timing, rewards, agents, motions, and USD match")
+    print("NOTE: TWIST-style action mapping, default pose, and PD gains are intentional JOSE differences")
     print("NOTE: JOSE uses the same GroundPlane implementation and material as SOLO")
     print("NOTE: JOSE additionally registers Jump and exposes read-only estimator/distillation sensors")
 

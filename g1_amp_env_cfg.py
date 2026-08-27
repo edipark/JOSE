@@ -1,4 +1,4 @@
-"""Environment configurations for SOLO-aligned G1 AMP walk, dance, and jump."""
+"""Environment configurations for G1 AMP walk, dance, and jump."""
 
 from __future__ import annotations
 
@@ -11,7 +11,13 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
 
 from .g1_cfg import G1_SOLO_CFG
-from .task_math import AMP_HISTORY_STEPS, CONTROL_DECIMATION, EPISODE_LENGTH_S, PHYSICS_DT
+from .task_math import (
+    AMP_HISTORY_STEPS,
+    CONTROL_DECIMATION,
+    EPISODE_LENGTH_S,
+    PHYSICS_DT,
+    TWIST_ACTION_SCALE,
+)
 
 
 MOTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motions")
@@ -23,6 +29,7 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     decimation = CONTROL_DECIMATION
     observation_space = 101
     action_space = 29
+    action_scale = TWIST_ACTION_SCALE
     state_space = 0
     num_amp_observations = AMP_HISTORY_STEPS
     amp_observation_space = 101

@@ -15,33 +15,31 @@ POLICY_DT = PHYSICS_DT * CONTROL_DECIMATION
 EPISODE_LENGTH_S = 20.0
 AMP_HISTORY_STEPS = 4
 WALK_TARGET_VELOCITY = 0.6
-NORMALIZED_ACTION_LIMIT = 1.0
+TWIST_ACTION_SCALE = 0.5
 
 
-def clip_normalized_actions(
-    actions: torch.Tensor, limit: float = NORMALIZED_ACTION_LIMIT
+def twist_action_to_position(
+    actions: torch.Tensor,
+    default_positions: torch.Tensor,
+    soft_joint_limits: torch.Tensor,
+    action_scale: float = TWIST_ACTION_SCALE,
 ) -> torch.Tensor:
-    """Clamp normalized policy actions before mapping them to joint targets."""
-    if limit <= 0.0:
-        raise ValueError(f"Action clip limit must be positive, got {limit}")
-    return actions.clamp(min=-limit, max=limit)
+    """Map TWIST-style actions to default-centered targets and enforce soft limits.
 
-
-def soft_limit_action_parameters(soft_joint_limits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the midpoint offset and half-range scale of ``[..., joint, lower/upper]`` limits."""
+    TWIST interprets each policy output as a radian offset scaled by ``0.5``:
+    ``q_target = q_default + action_scale * action``. The policy action itself is
+    deliberately not clipped to ``[-1, 1]``; only the resulting joint target is
+    bounded here.
+    """
+    if action_scale <= 0.0:
+        raise ValueError(f"Action scale must be positive, got {action_scale}")
     if soft_joint_limits.shape[-1] != 2:
         raise ValueError("Soft joint limits must end with lower/upper bounds")
     lower, upper = soft_joint_limits.unbind(dim=-1)
     if torch.any(upper < lower):
         raise ValueError("Soft joint upper limits must be greater than or equal to lower limits")
-    return 0.5 * (upper + lower), 0.5 * (upper - lower)
-
-
-def normalized_action_to_position(
-    actions: torch.Tensor, offset: torch.Tensor, scale: torch.Tensor
-) -> torch.Tensor:
-    """Clip normalized actions and map them into soft joint-position limits."""
-    return offset + scale * clip_normalized_actions(actions)
+    targets = default_positions + action_scale * actions
+    return torch.maximum(torch.minimum(targets, upper), lower)
 
 
 def action_finite_difference_penalties(

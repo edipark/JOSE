@@ -1,4 +1,4 @@
-"""29-DOF Unitree G1 AMP environment aligned with the current SOLO task."""
+"""29-DOF Unitree G1 AMP environment with a TWIST-style action interface."""
 
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ from .motions.motion_loader import MotionLoader
 from .schema import G1_JOINT_NAMES, G1_KEY_BODY_NAMES
 from .task_math import (
     action_finite_difference_penalties,
-    normalized_action_to_position,
     reference_history_times,
-    soft_limit_action_parameters,
+    twist_action_to_position,
 )
 
 
@@ -28,9 +27,9 @@ class G1AmpEnv(DirectRLEnv):
 
     def __init__(self, cfg: G1AmpEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        self.action_offset, self.action_scale = soft_limit_action_parameters(
-            self.robot.data.soft_joint_pos_limits[0]
-        )
+        self.action_offset = self.robot.data.default_joint_pos[0].clone()
+        self.action_scale = torch.full_like(self.action_offset, float(self.cfg.action_scale))
+        self.action_soft_limits = self.robot.data.soft_joint_pos_limits[0].clone()
         self.actions = torch.zeros((self.num_envs, 29), device=self.device)
         self.previous_actions = torch.zeros_like(self.actions)
         self.previous_previous_actions = torch.zeros_like(self.actions)
@@ -93,8 +92,15 @@ class G1AmpEnv(DirectRLEnv):
         self._action_history_count.clamp_max_(2).add_(1)
 
     def _apply_action(self):
-        self.robot.set_joint_position_target(
-            normalized_action_to_position(self.actions, self.action_offset, self.action_scale)
+        self.robot.set_joint_position_target(self.action_to_joint_position(self.actions))
+
+    def action_to_joint_position(self, actions: torch.Tensor) -> torch.Tensor:
+        """Convert raw policy actions into safe TWIST-style position targets."""
+        return twist_action_to_position(
+            actions,
+            self.action_offset,
+            self.action_soft_limits,
+            action_scale=float(self.cfg.action_scale),
         )
 
     def _current_amp_observation(self) -> torch.Tensor:
