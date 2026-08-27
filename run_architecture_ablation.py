@@ -2,16 +2,11 @@
 
 try:
     from .ablation_runner import main
+    from .ablation_catalog import ARCHITECTURE_EXPERIMENTS
 except ImportError:
     from ablation_runner import main
-
-
-EXPERIMENTS = (
-    ("LSTM_w50_all", "LSTM", 50, "all", 10),
-    ("TCN_w50_all", "TCN", 50, "all", 10),
-    ("HistoryMLP_w50_all", "HISTORY_MLP", 50, "all", 10),
-)
+    from ablation_catalog import ARCHITECTURE_EXPERIMENTS
 
 
 if __name__ == "__main__":
-    main(EXPERIMENTS, "architecture")
+    main(ARCHITECTURE_EXPERIMENTS, "architecture")

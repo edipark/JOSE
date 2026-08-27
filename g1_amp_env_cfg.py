@@ -40,7 +40,7 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     vel_window_steps = 10
     motion_file: str = MISSING
     reference_body = "pelvis"
-    reset_strategy = "random"
+    reset_strategy = "default"
 
     # World +X velocity task reward. Disabled in the base/dance/jump task and
     # enabled by G1AmpWalkEnvCfg, matching SOLO's reward equation.

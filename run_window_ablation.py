@@ -7,11 +7,13 @@ import sys
 
 try:
     from .ablation_runner import main
+    from .ablation_catalog import window_experiments
 except ImportError:
     from ablation_runner import main
+    from ablation_catalog import window_experiments
 
 
-DEFAULT_WINDOWS = (1, 5, 10, 20, 50)
+DEFAULT_WINDOWS = (1, 5, 10, 25, 50)
 
 
 def parse_windows(values: list[int] | tuple[int, ...]) -> tuple[int, ...]:
@@ -30,5 +32,4 @@ def extract_windows(argv: list[str]) -> tuple[tuple[int, ...], list[str]]:
 if __name__ == "__main__":
     windows, remaining = extract_windows(sys.argv[1:])
     sys.argv = [sys.argv[0], *remaining]
-    experiments = tuple((f"LSTM_w{window}_all", "LSTM", window, "all", 10) for window in windows)
-    main(experiments, "window")
+    main(window_experiments(windows), "window")

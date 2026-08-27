@@ -85,7 +85,10 @@ def main(env_cfg, agent_cfg):
     output = Path(args_cli.output_dir) / (args_cli.run_name or default_name)
     output.mkdir(parents=True, exist_ok=True)
     (output / "training.json").write_text(json.dumps({"metrics": metrics}, indent=2), encoding="utf-8")
-    print(f"TeacherGT return={metrics['return_mean']:.4f} success={metrics['success_rate']:.2f}%")
+    print(
+        f"TeacherGT eplen={metrics['episode_length_mean']:.2f} "
+        f"return={metrics['return_mean']:.4f} success={metrics['success_rate']:.2f}%"
+    )
     env.close()
 
 

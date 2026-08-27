@@ -33,6 +33,7 @@ schema = _load_module("jose_g1_schema_test", JOSE_DIR / "schema.py")
 compat = _load_module("jose_g1_compat_test", JOSE_DIR / "skrl_compat.py")
 models = _load_module("jose_g1_models_test", JOSE_DIR / "estimator" / "models.py")
 reporting = _load_module("jose_g1_reporting_test", JOSE_DIR / "reporting.py")
+ablation_catalog = _load_module("jose_g1_ablation_catalog_test", JOSE_DIR / "ablation_catalog.py")
 task_math = _load_module("jose_g1_task_math_test", JOSE_DIR / "task_math.py")
 motion_loader = _load_module("jose_g1_motion_loader_test", JOSE_DIR / "motions" / "motion_loader.py")
 imu = _load_module("jose_g1_imu_test", JOSE_DIR / "distillation" / "imu.py")
@@ -334,7 +335,7 @@ def test_jose_pipeline_entry_points():
         "train_joint_only_distillation.py", "play_teacher_with_estimator.py", "play_dagger.py",
         "play_history_student.py",
         "run_architecture_ablation.py", "run_window_ablation.py", "run_joint_scope_ablation.py",
-        "run_method_comparison.py",
+        "run_method_comparison.py", "ablation_catalog.py",
     ):
         assert (JOSE_DIR / name).is_file()
 
@@ -367,10 +368,95 @@ def test_ablation_factors_are_isolated_and_window_is_configurable(tmp_path):
 
 def test_window_defaults_and_validation():
     module = _load_module("jose_window_ablation_test", JOSE_DIR / "run_window_ablation.py")
-    assert module.DEFAULT_WINDOWS == (1, 5, 10, 20, 50)
+    assert module.DEFAULT_WINDOWS == (1, 5, 10, 25, 50)
     assert module.parse_windows([50, 1, 5, 5]) == (1, 5, 50)
     with pytest.raises(ValueError, match="positive"):
         module.parse_windows([1, 0])
+
+
+def test_teacher_catalog_is_content_scoped_and_hierarchical(tmp_path):
+    first = tmp_path / "teacher_run_a" / "checkpoints" / "best_agent.pt"
+    second = tmp_path / "copied_teacher" / "best_agent.pt"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_bytes(b"same teacher")
+    second.write_bytes(b"same teacher")
+    fingerprint = {"size": first.stat().st_size, "sha256": "teacher-sha"}
+    root = tmp_path / "ablation"
+    catalog_a = ablation_catalog.TeacherCatalog.open(root, first, fingerprint, create=True)
+    catalog_b = ablation_catalog.TeacherCatalog.open(root, second, fingerprint, create=True)
+    assert catalog_a.teacher_root == catalog_b.teacher_root
+    entry = catalog_a.entry_path(
+        "amp_walk", 42, "lstm_w50_all", "spec-id", estimator="LSTM", window=50, joint_preset="all"
+    )
+    assert entry.relative_to(catalog_a.teacher_root).parts == (
+        "amp_walk", "catalog", "estimators", "lstm", "window_50", "joints_all", "seed_42",
+        "variants", "spec-id",
+    )
+    study = catalog_a.study_path("amp_walk", "architecture", "2026-08-27_12-00-00")
+    assert study.relative_to(catalog_a.teacher_root).parts == (
+        "amp_walk", "studies", "architecture", "2026-08-27_12-00-00",
+    )
+
+
+def test_catalog_requires_complete_artifacts(tmp_path):
+    entry = tmp_path / "entry"
+    artifact = tmp_path / "artifact" / "training.json"
+    artifact.parent.mkdir()
+    artifact.write_text("{}", encoding="utf-8")
+    record = {"status": "ok", "artifact": str(artifact), "experiment": "lstm_w50_all", "metrics": {}}
+    ablation_catalog.TeacherCatalog.write_attempt(entry, "run", record, make_current=True)
+    assert ablation_catalog.TeacherCatalog.read_complete(entry, require_checkpoint=True) is None
+    (artifact.parent / "best_estimator.pt").write_bytes(b"checkpoint")
+    assert ablation_catalog.TeacherCatalog.read_complete(entry, require_checkpoint=True) == record
+
+
+def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):
+    teacher = tmp_path / "teacher_run" / "checkpoints" / "best_agent.pt"
+    teacher.parent.mkdir(parents=True)
+    teacher.write_bytes(b"teacher")
+    output = tmp_path / "ablation"
+    common = [
+        "--teacher_checkpoint", str(teacher), "--fast", "--seeds", "1", "--output-dir", str(output),
+    ]
+    dry_run = subprocess.run(
+        [sys.executable, str(JOSE_DIR / "run_architecture_ablation.py"), "--dry-run", *common],
+        check=True, capture_output=True, text=True,
+    )
+    attempts = [
+        line.split("--output-dir ", 1)[1].split()[0]
+        for line in dry_run.stdout.splitlines()
+        if "--output-dir " in line and "/variants/" in line
+    ]
+    names = ("teacher_gt", "lstm_w50_all", "tcn_w50_all", "history_mlp_w50_all")
+    assert len(attempts) == len(names)
+    for attempt, name in zip(attempts, names):
+        entry = Path(attempt).parent.parent
+        artifact = tmp_path / f"{name}_artifact" / "training.json"
+        artifact.parent.mkdir()
+        artifact.write_text(json.dumps({"metrics": {"episode_length_mean": 100.0, "rmse": 0.1}}))
+        if name != "teacher_gt":
+            (artifact.parent / "best_estimator.pt").write_bytes(b"checkpoint")
+        record = {
+            "task": "amp_walk", "task_id": "Task", "experiment": name, "seed": 42,
+            "status": "ok", "artifact": str(artifact),
+            "metrics": {"episode_length_mean": 100.0, "rmse": 0.1},
+        }
+        ablation_catalog.TeacherCatalog.write_attempt(entry, "fixture", record, make_current=True)
+
+    completed = subprocess.run(
+        [sys.executable, str(JOSE_DIR / "run_architecture_ablation.py"), *common],
+        check=True, capture_output=True, text=True,
+    )
+    assert completed.stdout.count("REUSE_RESULT") == 4
+    assert "teacher_gt/seed42 REUSE_RESULT eplen=100.00" in completed.stdout
+    manifests = list(output.glob("*/amp_walk/studies/architecture/*/manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["status"] == "complete" and manifest["catalog_complete"] is True
+    teacher_job = next(job for job in manifest["jobs"] if job["experiment"] == "teacher_gt")
+    assert teacher_job["eplen"] == 100.0
+    assert Path(manifest["report"]).is_file()
 
 
 def test_method_comparison_accepts_one_to_three_cases(tmp_path):

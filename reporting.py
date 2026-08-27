@@ -50,7 +50,8 @@ def aggregate(rows: list[dict]) -> list[dict]:
     teacher_lengths = {
         row["task"]: row["episode_length_mean_mean"]
         for row in output
-        if row["experiment"] == "TeacherGT" and row.get("episode_length_mean_mean", 0.0) > 0.0
+        if row["experiment"].lower() in ("teachergt", "teacher_gt")
+        and row.get("episode_length_mean_mean", 0.0) > 0.0
     }
     for row in output:
         baseline = teacher_lengths.get(row["task"])

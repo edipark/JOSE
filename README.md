@@ -152,15 +152,15 @@ Unrelated AX18/hardware/system-identification code is intentionally excluded.
 
 ## Ablation and four-way comparison
 
-The three estimator factors have separate executable entry points. They share cache/report infrastructure but never
-mix factors in one study. Window defaults are `1 5 10 20 50`; `--windows` accepts positive integers, removes duplicates,
+The three estimator factors have separate executable entry points. They share one teacher-scoped catalog but never
+mix factors in one study. Window defaults are `1 5 10 25 50`; `--windows` accepts positive integers, removes duplicates,
 and sorts them.
 
 ```bash
 python -m jose.run_architecture_ablation \
   --teacher_checkpoint <walk_amp.pt> --task amp_walk --seeds 3 --seed_start 42 --headless
 python -m jose.run_window_ablation \
-  --teacher_checkpoint <walk_amp.pt> --windows 1 5 10 20 50 --headless
+  --teacher_checkpoint <walk_amp.pt> --windows 1 5 10 25 50 --headless
 python -m jose.run_joint_scope_ablation \
   --teacher_checkpoint <walk_amp.pt> --headless
 
@@ -174,13 +174,27 @@ and live only in the four-way comparison. Initial teacher rollouts are cached pe
 teacher/task/seed: the 50-frame all-joint dataset is projected to shorter windows and joint subsets and shared for the
 initial supervised phase. Model-dependent DAgger rollouts are not shared.
 Runs stay sequential on a single GPU to avoid multiple Isaac Sim processes competing for VRAM, while subprocess output
-is streamed live to the terminal and `process_logs/`.
-Use `--experiments LSTM_DAgger_w50_all --skip-student` for a targeted estimator rerun.
+is streamed live to the terminal and saved with each catalog attempt.
+Use canonical names such as `--experiments lstm_w50_all` for a targeted catalog fill.
 
-Each argument/checkpoint/code combination is isolated under `ablation/sessions/<run-signature>/`. Repeated attempts have
-separate artifact and TensorBoard directories; `raw_results.jsonl` remains an audit log while reports use only the latest
-record for each task/seed/experiment. Dataset cache keys include the teacher checkpoint contents and estimator/environment
-implementation, and an output-directory lock rejects overlapping ablation launchers.
+The output hierarchy starts with the teacher checkpoint identity, followed by task, reusable catalog artifacts, and dated
+studies: `ablation/<teacher-id>/<task>/{catalog,studies}`. The readable teacher ID comes from the checkpoint's training
+directory and filename, while checkpoint contents (SHA-256) decide identity even if a file is copied or renamed. A study
+first reuses compatible completed entries from the teacher catalog, runs only missing entries, and generates its final
+report only after every requested seed/experiment is complete. Window, architecture, and joint-scope studies therefore
+share identical entries such as `lstm_w50_all`, the teacher evaluation, and initial rollout datasets. Former
+`<study>/sessions/<run-signature>` results are registered by reference when their saved configuration and artifacts match;
+use `--no-import-legacy` to disable this migration. `--rerun` creates a new attempt without deleting the last successful
+catalog entry.
+
+```text
+ablation/<teacher-id>/<task>/
+├── catalog/
+│   ├── datasets/seed_<n>/window_<n>/joints_all/
+│   ├── jobs/teacher_gt/seed_<n>/
+│   └── estimators/<model>/window_<n>/joints_<preset>/seed_<n>/
+└── studies/<window|architecture|joint_scope>/<YYYY-MM-DD_HH-MM-SS>/
+```
 
 Outputs include raw JSONL, aggregate JSON, tidy/summary CSV, Markdown and LaTeX tables, `report.md`, and PNG/PDF
 plots with mean, standard deviation, and 95% confidence intervals. Estimator error, target-specific error, closed-loop
