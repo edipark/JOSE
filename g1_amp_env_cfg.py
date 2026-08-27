@@ -21,6 +21,7 @@ from .task_math import (
 
 
 MOTIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motions")
+G1_AMP_ROBOT_CFG = G1_SOLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
 
 @configclass
@@ -58,7 +59,7 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
         physx=PhysxCfg(gpu_found_lost_pairs_capacity=2**23, gpu_total_aggregate_pairs_capacity=2**23),
     )
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
-    robot = G1_SOLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot = G1_AMP_ROBOT_CFG
 
 
 @configclass
@@ -71,7 +72,7 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 
 @configclass
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
-    robot = G1AmpEnvCfg.robot.replace(soft_joint_pos_limit_factor=1.0)
+    robot = G1_AMP_ROBOT_CFG.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
     reset_strategy = "default"
 
@@ -80,7 +81,7 @@ class G1AmpDanceEnvCfg(G1AmpEnvCfg):
 class G1AmpJumpEnvCfg(G1AmpEnvCfg):
     """SOLO-aligned AMP with the jump motion and a jump-safe pelvis threshold."""
 
-    robot = G1AmpEnvCfg.robot.replace(soft_joint_pos_limit_factor=1.0)
+    robot = G1_AMP_ROBOT_CFG.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_jump.npz")
     reset_strategy = "random"
     termination_height = 0.20
