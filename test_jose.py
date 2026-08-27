@@ -341,6 +341,8 @@ def test_jose_pipeline_entry_points():
 
 
 def test_ablation_factors_are_isolated_and_window_is_configurable(tmp_path):
+    assert "default=250000" in (JOSE_DIR / "ablation_runner.py").read_text(encoding="utf-8")
+    assert "default=250000" in (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
     common = [
         "--teacher_checkpoint", str(tmp_path / "teacher.pt"), "--dry-run", "--fast", "--seeds", "1",
         "--skip-student", "--output-dir", str(tmp_path / "ablation"),
@@ -434,13 +436,19 @@ def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):
         entry = Path(attempt).parent.parent
         artifact = tmp_path / f"{name}_artifact" / "training.json"
         artifact.parent.mkdir()
-        artifact.write_text(json.dumps({"metrics": {"episode_length_mean": 100.0, "rmse": 0.1}}))
+        metrics = {"episode_length_mean": 100.0, "rmse": 0.1}
+        if name == "lstm_w50_all":
+            metrics.update({
+                "target_rmse": [0.1, 0.2],
+                "rounds": [{"round": 0, "training": {"best_validation_mse": 0.25}}],
+            })
+        artifact.write_text(json.dumps({"metrics": metrics}))
         if name != "teacher_gt":
             (artifact.parent / "best_estimator.pt").write_bytes(b"checkpoint")
         record = {
             "task": "amp_walk", "task_id": "Task", "experiment": name, "seed": 42,
             "status": "ok", "artifact": str(artifact),
-            "metrics": {"episode_length_mean": 100.0, "rmse": 0.1},
+            "metrics": metrics,
         }
         ablation_catalog.TeacherCatalog.write_attempt(entry, "fixture", record, make_current=True)
 
@@ -457,6 +465,12 @@ def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):
     teacher_job = next(job for job in manifest["jobs"] if job["experiment"] == "teacher_gt")
     assert teacher_job["eplen"] == 100.0
     assert Path(manifest["report"]).is_file()
+    intermediate = json.loads((manifests[0].parent / "intermediate_results.json").read_text())
+    assert intermediate["status"] == "complete"
+    assert intermediate["progress"] == {"total": 4, "complete": 4, "failed": 0, "missing": 0}
+    lstm = next(row for row in intermediate["results"] if row["experiment"] == "lstm_w50_all")
+    assert lstm["metrics"]["target_rmse"] == [0.1, 0.2]
+    assert lstm["metrics"]["rounds"][0]["training"]["best_validation_mse"] == 0.25
 
 
 def test_method_comparison_accepts_one_to_three_cases(tmp_path):

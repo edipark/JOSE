@@ -17,6 +17,7 @@ PRIMARY_METRICS = (
     "teacher_action_mse", "action_smoothness", "energy", "torque_rms", "inference_ms_per_sample", "parameters",
     "success_rate", "base_linear_speed", "base_angular_speed", "action_saturation", "torque_saturation",
     "raw_task_reward", "amp_raw_style", "amp_scaled_task", "amp_scaled_style", "amp_effective_reward",
+    "wall_time_s", "collection_duration_s", "collection_samples_per_s",
 )
 
 

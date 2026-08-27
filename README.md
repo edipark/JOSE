@@ -1,240 +1,451 @@
 # JOSE G1
 
-### State estimation from robot joint observations
+JOSE is an Isaac Lab package for the Unitree G1 robot (29 DOF). You can use it to train walk, dance, and jump policies. It also includes state estimators, DAgger students, ablation studies, and motion tools.
 
-JOSE is a standalone Isaac Lab package: task modules, motions, assets, train/play entry points, and experiment code
-live directly in the installable `jose` package. It trains 29-DOF Unitree G1 walk,
-dance, and jump policies with an
-[Adversarial Motion Prior (AMP)](https://xbpeng.github.io/projects/AMP/), then replaces policy-only base information
-with a learned state estimator. Its AMP objective mirrors the local SOLO task, while its policy-to-actuator interface
-uses TWIST-style default-centered actions and PD gains. The
-original G1 assets and reference motions derive from
-[`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp). All task code, assets, motions, estimator code,
-tools, and tests are physically contained here; it is not an IsaacLab fork and no external research repository is
-imported or used at runtime.
+## Requirements
 
-The default estimator uses every G1 joint: 29 joint positions plus the 29 simulator joint velocities (58D). For AMP it
-predicts the complete 43D privileged suffix: height, tangent/normal basis, root velocities, and ten key-body relative
-positions. PPO keeps its policy-specific 9D base-state target. No finite-difference velocity, encoder quantization, or
-EMA filtering is used.
+- Linux
+- Python 3.10 or newer
+- A working Isaac Lab environment
+- `skrl>=2.0,<3.0`
+- A CUDA GPU is recommended
 
-Install JOSE into the same Python environment as Isaac Lab:
+Activate the Python environment that contains Isaac Lab. Then install JOSE in the same environment.
+
+Replace `/path/to/JOSE` with the path to this repository.
 
 ```bash
-python -m pip install -e /home/usd/jose_ws/JOSE
+cd /path/to/JOSE
+python -m pip install -e .
+```
+
+Check the installation:
+
+```bash
 python -c "import jose; print('JOSE tasks registered')"
 ```
 
-## Pipeline
+The `-e` option installs the package in editable mode. Code changes are available without reinstalling the package.
 
-### Phase 1 — privileged policy
+## Quick start
 
-Train an AMP walk, dance, or jump teacher with the 101D G1 motion observation. The AMP objective follows SOLO, while
-joint targets use `q_target = q_default + 0.5 * action` and TWIST PD gains. Final targets are clamped to each joint's
-soft limit; raw policy actions are not clipped to `[-1, 1]`. JOSE retains all 29 actions, including the wrists, rather
-than adopting TWIST's 23-action interface with fixed wrists. The policy uses trainable Gaussian exploration from
-`log_std=-1.2`, and the same policy/value/discriminator networks. Walk combines velocity tracking with a
-second-order finite-difference action penalty
-(`task_reward_scale: 0.5`) with AMP style reward (`style_reward_scale: 2.0`); Dance and Jump use only the style term.
-Physics runs at 200 Hz with decimation 4 (50 Hz policy control), matching Unitree's G1 RL/deployment timing. The
-discriminator receives four policy-rate AMP frames (4 x 101D = 404D), and episodes last 20 seconds. JOSE's estimator,
-distillation, metrics, and replay interfaces
-are layered on this teacher without changing its AMP objective.
+The basic workflow is:
+
+1. Train an AMP teacher.
+2. Find the saved checkpoint.
+3. Play the trained policy.
+
+### 1. Train a walking teacher
 
 ```bash
-# Walk AMP
 python -m jose.train \
-  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 --algorithm AMP \
-  --experiment_name amp_walk --headless
-
-# Video also writes action/position/torque diagnostics next to the recording
-python -m jose.play \
-  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 --algorithm AMP \
-  --checkpoint <best_agent.pt> --video --video_length 300 --print-base-velocity
-
-# Dance AMP
-python -m jose.train \
-  --task Isaac-G1-AMP-Dance-JOSE-Direct-v0 --algorithm AMP --headless
-
-# Jump AMP: random reference reset, pure style reward, 0.20 m termination
-python -m jose.train \
-  --task Isaac-G1-AMP-Jump-JOSE-Direct-v0 --algorithm AMP --headless
-
-# Development audit of the shared AMP objective/assets (TWIST action/PD differences are excluded)
-python -m jose.tools.check_solo_amp_parity \
-  --reference /home/usd/jose_ws/SOLO
-
-# A policy-only SKRL PPO walking example using the same 29-DOF interface
-python -m jose.train \
-  --task Isaac-G1-PPO-Walk-JOSE-Direct-v0 --algorithm PPO --headless
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --experiment_name walk_example \
+  --headless
 ```
 
-### Phase 2 — estimator and distillation
+The training output is saved in a directory like this:
 
-Collect frozen-teacher rollouts and train the default two-layer, hidden-256 LSTM with history 50. Add
-`--joint-preset legs` or `--joint-preset upper` for the input ablations, or select `--estimator TCN`/`MLP`.
+```text
+logs/skrl/g1_jose_amp_walk/<date>_AMP_torch_walk_example/
+├── checkpoints/
+├── params/
+└── ...
+```
+
+List the saved checkpoints:
+
+```bash
+find logs/skrl/g1_jose_amp_walk -path '*/checkpoints/*.pt' -print
+```
+
+### 2. Play the teacher
+
+Set `TEACHER` to the real checkpoint path:
+
+```bash
+export TEACHER=/absolute/path/to/best_agent.pt
+
+python -m jose.play \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --checkpoint "$TEACHER"
+```
+
+To record a video without opening the simulator window:
+
+```bash
+python -m jose.play \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --checkpoint "$TEACHER" \
+  --video \
+  --video_length 600 \
+  --headless
+```
+
+Videos and rollout diagnostics are saved under `videos/play/` in the training run directory. Add `--print-base-velocity` to print the base velocity in the terminal.
+
+## Tasks
+
+| Purpose | Task ID | Algorithm |
+|---|---|---|
+| AMP walk | `Isaac-G1-AMP-Walk-JOSE-Direct-v0` | `AMP` |
+| AMP dance | `Isaac-G1-AMP-Dance-JOSE-Direct-v0` | `AMP` |
+| AMP jump | `Isaac-G1-AMP-Jump-JOSE-Direct-v0` | `AMP` |
+| PPO walk example | `Isaac-G1-PPO-Walk-JOSE-Direct-v0` | `PPO` |
+
+Use a different task ID to train dance, jump, or PPO walk:
+
+```bash
+# Dance
+python -m jose.train \
+  --task Isaac-G1-AMP-Dance-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --headless
+
+# Jump
+python -m jose.train \
+  --task Isaac-G1-AMP-Jump-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --headless
+
+# PPO walk
+python -m jose.train \
+  --task Isaac-G1-PPO-Walk-JOSE-Direct-v0 \
+  --algorithm PPO \
+  --headless
+```
+
+Common training options:
+
+| Option | Description | Example |
+|---|---|---|
+| `--num_envs` | Number of parallel environments | `--num_envs 2048` |
+| `--max_iterations` | Maximum training iterations | `--max_iterations 5000` |
+| `--seed` | Random seed | `--seed 42` |
+| `--device` | GPU device | `--device cuda:0` |
+| `--video` | Record videos during training | `--video --video_interval 5000` |
+| `--headless` | Run without a GUI | `--headless` |
+
+To continue training from a checkpoint:
+
+```bash
+python -m jose.train \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --algorithm AMP \
+  --checkpoint "$TEACHER" \
+  --experiment_name walk_resume \
+  --headless
+```
+
+## State estimator
+
+The state estimator learns from a fixed teacher. It uses a history of joint positions and simulator joint velocities to estimate the privileged state.
+
+### Train an estimator
+
+The default model is a two-layer LSTM with a 50-frame history.
 
 ```bash
 python -m jose.train_state_estimator \
-  --teacher_checkpoint <best_agent.pt> \
+  --teacher-checkpoint "$TEACHER" \
   --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
-  --estimator LSTM --window 50 --joint-preset all --dagger-rounds 10 --headless
+  --estimator LSTM \
+  --window 50 \
+  --joint-preset all \
+  --dagger-rounds 10 \
+  --run-name walk_lstm_w50 \
+  --headless
 ```
 
-Two direct-policy baselines use the same deterministic `256-256-128` history MLP, normalizers, optimizer, replay,
-DAgger beta schedule, and training budget. Both consume the current frame plus 20 prior frames:
+The result is saved in:
 
-- Joint-only: `q(29) + qdot(29) + previous_action(29)`, 87D/frame and 1,827D total.
-- IMU-based: joint-only plus body gyro(3) and quaternion-derived projected gravity(3), 93D/frame and 1,953D total.
-
-```bash
-python -m jose.train_joint_only_distillation \
-  --teacher-checkpoint <best_agent.pt> --num-iterations 300 --headless
-
-python -m jose.train_imu_distillation \
-  --teacher-checkpoint <best_agent.pt> --num-iterations 300 --headless
+```text
+logs/jose_g1/estimators/walk_lstm_w50/
 ```
 
-### 왜 explicit linear velocity를 제외하는가
+Use `best_estimator.pt` for evaluation and playback.
 
-이 history student 설계는 [GMT](https://arxiv.org/abs/2506.14770)의 현재+과거 20프레임 proprioceptive history와
-DAgger 구성을 주 근거로 삼고, [OmniH2O](https://arxiv.org/abs/2406.08858)를 보조 근거로 삼는다. OmniH2O는
-실기에서 직접 신뢰하기 어려운 global/base linear velocity를 관측으로 주는 대신 proprioceptive history가 속도를
-암묵적으로 추론하도록 하며, history student의 closed-loop distribution shift에 DAgger가 특히 유효함을 보고한다.
-따라서 두 direct student에는 base linear velocity나 linear acceleration을 넣지 않는다. 반면 JOSE estimator는
-joint history로 teacher의 43D privileged suffix를 추정하므로, 그 suffix 안에 linear velocity 추정값이 존재하는 것은
-실기 센서가 explicit velocity를 policy에 제공하는 것과 다르다.
-
-Projected gravity는 real-world 입력으로 유지한다. Unitree G1 LowState quaternion에서
-`g_B = R_WB^T [0, 0, -1]`로 계산하며 raw accelerometer를 정규화하지 않는다. 학습 시 gyro noise/bias,
-gravity tilt, 0--2 step latency를 적용한다. quaternion order/frame, IMU-to-pelvis extrinsic, norm, NaN, timestamp
-freshness는 `IMUObservationSpec` 하나로 simulation과 G1 adapter가 공유한다. 실제 G1 standing/walking/jump-landing
-log 검증은 배포 acceptance gate이며 synthetic log는 parser 검증만 통과시킨다.
-
-### Phase 3 — estimated-state inference
-
-Teacher checkpoints are loaded through SKRL's public `Runner`/`agent.load()` API. The player uses the SKRL 2.x
-evaluation API and can produce an action/estimate CSV alongside a video.
+For a short test run, use less data and fewer training rounds:
 
 ```bash
+python -m jose.train_state_estimator \
+  --teacher-checkpoint "$TEACHER" \
+  --collect-steps 100 \
+  --epochs 2 \
+  --dagger-rounds 1 \
+  --num-envs 16 \
+  --run-name estimator_smoke \
+  --headless
+```
+
+Available model and input options:
+
+- `--estimator`: `LSTM`, `TCN`, `MLP`, or `HISTORY_MLP`
+- `--joint-preset`: `all`, `legs`, or `upper`
+- `--window`: any positive history length
+
+### Play the teacher with an estimator
+
+```bash
+export ESTIMATOR=logs/jose_g1/estimators/walk_lstm_w50/best_estimator.pt
+
 python -m jose.play_teacher_with_estimator \
-  --teacher-checkpoint <best_agent.pt> --estimator-checkpoint <best_estimator.pt> \
-  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 --csv-output logs/rollout.csv --video
+  --teacher-checkpoint "$TEACHER" \
+  --estimator-checkpoint "$ESTIMATOR" \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --steps 1000 \
+  --csv-output logs/rollout.csv \
+  --video \
+  --headless
+```
+
+Videos are saved in `logs/jose_g1/videos/teacher_estimator/` by default. The `--csv-output` option saves actions and state estimates for each step.
+
+## DAgger policies and history students
+
+### Train a 58D joint-state DAgger student
+
+```bash
+python -m jose.train_dagger \
+  --teacher-checkpoint "$TEACHER" \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --num-iterations 300 \
+  --headless
+```
+
+Checkpoints are saved under:
+
+```text
+logs/jose_g1/dagger/<date>/checkpoints/
+```
+
+The best checkpoint is named `student_best_eval.pt`.
+
+Play the trained student:
+
+```bash
+export DAGGER=/absolute/path/to/student_best_eval.pt
 
 python -m jose.play_dagger \
-  --checkpoint <student_best_eval.pt> --video
-
-python -m jose.play_history_student \
-  --checkpoint <imu_or_joint_student_best_eval.pt> --video
+  --checkpoint "$DAGGER" \
+  --steps 1000 \
+  --video \
+  --headless
 ```
 
-## Motion tools
+### Train 21-frame direct-policy baselines
 
-The bundled `G1_walk.npz`, `G1_dance.npz`, and `G1_jump.npz` follow the 29-joint reference schema. Available tools include schema
-validation, matplotlib visualization, Isaac Sim replay/recording, conversion, pelvis alignment, and reference tracking.
+The joint-only and IMU students use the same training setup but different inputs.
 
 ```bash
-# Inspect schema and values
-python -m jose.motions.verify_motion \
-  --file motions/G1_walk.npz
+# Joint position, joint velocity, and previous action
+python -m jose.train_joint_only_distillation \
+  --teacher-checkpoint "$TEACHER" \
+  --num-iterations 300 \
+  --headless
 
-# Isaac Sim replay; --record-output writes another compatible NPZ
-python -m jose.motions.motion_replayer \
-  --file motions/G1_dance.npz \
-  --speed 1.0 --video --print-base-velocity
-
-# Optional side-by-side skeleton view (requires a desktop session)
-python -m jose.motions.motion_replayer \
-  --file motions/G1_walk.npz --matplotlib
+# Joint inputs, body gyro, and projected gravity
+python -m jose.train_imu_distillation \
+  --teacher-checkpoint "$TEACHER" \
+  --num-iterations 300 \
+  --headless
 ```
 
-Unrelated AX18/hardware/system-identification code is intentionally excluded.
+The outputs are saved in:
 
-## Ablation and four-way comparison
+```text
+logs/jose_g1/distillation/joint_only/<date>/checkpoints/
+logs/jose_g1/distillation/imu/<date>/checkpoints/
+```
 
-The three estimator factors have separate executable entry points. They share one teacher-scoped catalog but never
-mix factors in one study. Window defaults are `1 5 10 25 50`; `--windows` accepts positive integers, removes duplicates,
-and sorts them.
+Both student types use the same playback command:
+
+```bash
+python -m jose.play_history_student \
+  --checkpoint /absolute/path/to/student_best_eval.pt \
+  --steps 1000 \
+  --video \
+  --headless
+```
+
+## Ablation studies
+
+All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test.
+
+### Compare estimator architectures
 
 ```bash
 python -m jose.run_architecture_ablation \
-  --teacher_checkpoint <walk_amp.pt> --task amp_walk --seeds 3 --seed_start 42 --headless
+  --teacher-checkpoint "$TEACHER" \
+  --task amp_walk \
+  --seeds 3 \
+  --seed-start 42 \
+  --headless
+```
+
+### Compare history windows
+
+```bash
 python -m jose.run_window_ablation \
-  --teacher_checkpoint <walk_amp.pt> --windows 1 5 10 25 50 --headless
+  --teacher-checkpoint "$TEACHER" \
+  --task amp_walk \
+  --windows 1 5 10 25 50 \
+  --headless
+```
+
+### Compare joint groups
+
+```bash
 python -m jose.run_joint_scope_ablation \
-  --teacher_checkpoint <walk_amp.pt> --headless
+  --teacher-checkpoint "$TEACHER" \
+  --task amp_walk \
+  --headless
+```
 
+To run only one experiment, pass its canonical name:
+
+```bash
+python -m jose.run_architecture_ablation \
+  --teacher-checkpoint "$TEACHER" \
+  --experiments lstm_w50_all \
+  --dry-run
+```
+
+Use `--rerun` to run completed ablation jobs again.
+
+### Compare all four methods
+
+This command compares the teacher, estimator, joint-only student, and IMU student:
+
+```bash
 python -m jose.run_method_comparison \
-  --case walk <walk_teacher.pt> --case jump <jump_teacher.pt> --seeds 42 43 44 --headless
+  --case walk /absolute/path/to/walk_teacher.pt \
+  --case jump /absolute/path/to/jump_teacher.pt \
+  --seeds 42 43 44 \
+  --headless
 ```
 
-Estimator ablations keep the standalone defaults (2,000 collection steps, 500k samples, 50 initial epochs, 10 epochs
-per DAgger round, and 10 rounds). Direct-policy baselines are intentionally excluded from these three factor studies
-and live only in the four-way comparison. Initial teacher rollouts are cached per
-teacher/task/seed: the 50-frame all-joint dataset is projected to shorter windows and joint subsets and shared for the
-initial supervised phase. Model-dependent DAgger rollouts are not shared.
-Runs stay sequential on a single GPU to avoid multiple Isaac Sim processes competing for VRAM, while subprocess output
-is streamed live to the terminal and saved with each catalog attempt.
-Use canonical names such as `--experiments lstm_w50_all` for a targeted catalog fill.
-
-The output hierarchy starts with the teacher checkpoint identity, followed by task, reusable catalog artifacts, and dated
-studies: `ablation/<teacher-id>/<task>/{catalog,studies}`. The readable teacher ID comes from the checkpoint's training
-directory and filename, while checkpoint contents (SHA-256) decide identity even if a file is copied or renamed. A study
-first reuses compatible completed entries from the teacher catalog, runs only missing entries, and generates its final
-report only after every requested seed/experiment is complete. Window, architecture, and joint-scope studies therefore
-share identical entries such as `lstm_w50_all`, the teacher evaluation, and initial rollout datasets. Former
-`<study>/sessions/<run-signature>` results are registered by reference when their saved configuration and artifacts match;
-use `--no-import-legacy` to disable this migration. `--rerun` creates a new attempt without deleting the last successful
-catalog entry.
+Default output directories:
 
 ```text
-ablation/<teacher-id>/<task>/
-├── catalog/
-│   ├── datasets/seed_<n>/window_<n>/joints_all/
-│   ├── jobs/teacher_gt/seed_<n>/
-│   └── estimators/<model>/window_<n>/joints_<preset>/seed_<n>/
-└── studies/<window|architecture|joint_scope>/<YYYY-MM-DD_HH-MM-SS>/
+logs/jose_g1/ablation/
+logs/jose_g1/method_comparison/
 ```
 
-Outputs include raw JSONL, aggregate JSON, tidy/summary CSV, Markdown and LaTeX tables, `report.md`, and PNG/PDF
-plots with mean, standard deviation, and 95% confidence intervals. Estimator error, target-specific error, closed-loop
-return/termination, action agreement/smoothness, dynamics/energy, AMP rewards, parameter count, and inference latency
-are supported metric fields.
+Completed jobs are reused when you restart the same study. A finished report contains JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a study is running.
 
-## SKRL compatibility
+## Motion tools
 
-- Supported dependency: `skrl>=2.0,<3.0`.
-- Configs use `observation_preprocessor`, `amp_observation_preprocessor`, `gae_lambda`, `task_reward_scale`, and
-  `style_reward_scale`.
-- Legacy keys such as `amp_state_preprocessor`, `*_reward_weight`, `discriminator_reward_scale`, `lambda`, and
-  `clip_predicted_values` are rejected with migration hints.
-- Checkpoint loaders accept only the current schema-v2 estimator and DAgger formats. Retrain older G1 checkpoints.
+JOSE includes these motion files:
 
-## Layout
+- `motions/G1_walk.npz`
+- `motions/G1_dance.npz`
+- `motions/G1_jump.npz`
+
+### Check an NPZ motion file
+
+```bash
+python -m jose.motions.verify_motion \
+  --file motions/G1_walk.npz
+```
+
+### Replay a motion in Isaac Sim
+
+```bash
+python -m jose.motions.motion_replayer \
+  --file motions/G1_dance.npz \
+  --speed 1.0 \
+  --video \
+  --print-base-velocity \
+  --headless
+```
+
+Add `--matplotlib` to show a skeleton plot on a desktop. Use `--record-output` to save the replay as another compatible NPZ file.
+
+```bash
+python -m jose.motions.motion_replayer \
+  --file motions/G1_walk.npz \
+  --loops 1 \
+  --record-output logs/recorded_walk.npz
+```
+
+### Convert a CSV motion to NPZ
+
+The input CSV must contain:
+
+1. Seven root columns: `x`, `y`, `z`, `qx`, `qy`, `qz`, `qw`
+2. Twenty-nine G1 joint-position columns
+
+```bash
+python -m jose.motions.data_convert \
+  --csv data/walk.csv \
+  --output motions/custom_walk.npz \
+  --input-fps 30 \
+  --output-fps 60
+```
+
+## Tests
+
+Run a short simulator test for one task:
+
+```bash
+python -m jose.tools.smoke_test \
+  --task amp_walk \
+  --steps 12 \
+  --num-envs 1 \
+  --headless
+```
+
+Available smoke-test tasks are `amp_walk`, `amp_dance`, `amp_jump`, and `ppo_walk`. Run one task per process because Isaac Sim uses one simulation context.
+
+Run the Python tests:
+
+```bash
+python -m pytest test_jose.py -q
+```
+
+Use `--help` to see all options for a command:
+
+```bash
+python -m jose.train_state_estimator --help
+python -m jose.run_window_ablation --help
+python -m jose.motions.motion_replayer --help
+```
+
+## Tips
+
+- Use `--headless` when you do not need the simulator window.
+- You can use `--video --headless` together to record a video without a GUI.
+- If GPU memory is low, reduce `--num_envs` or `--num-envs`.
+- Some commands use underscores in option names, while others use hyphens. Check `--help` if an option is not accepted.
+- Absolute checkpoint paths are easier to use when you run commands from different directories.
+- Ablation jobs run one at a time to avoid multiple Isaac Sim processes using the same GPU.
+- Old estimator or DAgger checkpoints may not work with the current schema-v2 loader. Train them again with the current code if needed.
+
+## Project layout
 
 ```text
-
-├── g1_amp_env.py, g1_amp_env_cfg.py     # AMP walk/dance/jump
-├── g1_ppo_env.py                        # extensible PPO walk example
-├── schema.py, skrl_compat.py             # public policy/estimator contracts
-├── estimator/                           # models, adapters, collection and training
-├── distillation/                        # history students and deploy IMU ABI
-├── agents/                              # SKRL 2.x AMP/PPO YAML
-├── motions/                             # reference data and conversion/view tools
-├── tools/                               # replay, tracking, rollout diagnostics
-├── train_state_estimator.py
-├── train_joint_only_distillation.py, train_imu_distillation.py
-├── play_teacher_with_estimator.py, play_dagger.py, play_history_student.py
-└── run_*_ablation.py, run_method_comparison.py, reporting.py
+├── g1_amp_env.py, g1_amp_env_cfg.py       # AMP walk, dance, and jump environments
+├── g1_ppo_env.py                          # PPO walk example
+├── agents/                                # SKRL AMP and PPO settings
+├── motions/                               # Motion data and motion tools
+├── estimator/                             # Estimator models and training code
+├── distillation/                          # History students and IMU input code
+├── tools/                                 # Smoke tests and diagnostics
+├── train.py, play.py                      # Teacher training and playback
+├── train_state_estimator.py               # State-estimator training
+├── train_dagger.py                        # 58D DAgger student training
+├── train_*_distillation.py                # Joint-only and IMU student training
+└── run_*_ablation.py                      # Ablations and method comparison
 ```
 
-To adapt another policy, implement the environment's `get_estimator_joint_state()` and `get_estimator_target()`
-methods, define its `ObservationSchema`, and add a `PolicyAdapter`. The collection, estimator, DAgger, evaluation, and
-reporting code then remains unchanged.
+JOSE runs policy control at 50 Hz and uses all 29 G1 joints. The default estimator input contains 29 joint positions and 29 simulator joint velocities. Direct history students do not use explicit base linear velocity or raw accelerometer data.
 
 ## License and attribution
 
-This repository is based on [Isaac Lab](https://github.com/isaac-sim/IsaacLab), licensed under BSD-3-Clause. See
-[LICENSE](LICENSE). The bundled G1 motion and
-USD resources retain attribution to [`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp); details are
-in `usd/README.md`.
+This repository is based on [Isaac Lab](https://github.com/isaac-sim/IsaacLab), which uses the BSD-3-Clause license. See [LICENSE](LICENSE) for details.
+
+The G1 motion and USD files keep attribution to [`linden713/humanoid_amp`](https://github.com/linden713/humanoid_amp). See [usd/README.md](usd/README.md) for details.

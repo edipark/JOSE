@@ -44,7 +44,7 @@ parser.add_argument("--dagger_est_ratio", "--dagger-est-ratio", dest="dagger_est
 parser.add_argument("--dagger_est_ratio_final", "--dagger-est-ratio-final", dest="dagger_est_ratio_final", type=float, default=1.0)
 parser.add_argument("--dagger_est_ratio_schedule", "--dagger-est-ratio-schedule", dest="dagger_est_ratio_schedule", choices=("linear", "constant"), default="linear")
 parser.add_argument("--dagger_extra_rounds", "--dagger-extra-rounds", dest="dagger_extra_rounds", type=int, default=0)
-parser.add_argument("--max_dataset_size", "--max-dataset-size", dest="max_dataset_size", type=int, default=500000)
+parser.add_argument("--max_dataset_size", "--max-dataset-size", dest="max_dataset_size", type=int, default=250000)
 parser.add_argument("--dataset-cache", default=None, help="Reusable initial teacher dataset cache (.pt)")
 parser.add_argument(
     "--dataset-cache-window", type=int, default=None,
@@ -135,24 +135,41 @@ def main(env_cfg, agent_cfg):
     config = {
         "teacher_checkpoint": teacher_fingerprint,
         "task": args_cli.task,
+        "agent": args_cli.agent,
         "adapter": args_cli.adapter,
         "estimator": args_cli.estimator,
         "window": window,
         "joint_preset": args_cli.joint_preset,
+        "hidden_size": args_cli.hidden_size,
+        "num_layers": args_cli.num_layers,
+        "tcn_channels": list(args_cli.tcn_channels),
         "collect_steps": args_cli.collect_steps,
+        "noise_levels": list(args_cli.noise_levels),
         "epochs": args_cli.epochs,
         "dagger_epochs": args_cli.dagger_epochs,
+        "batch_size": args_cli.batch_size,
+        "learning_rate": args_cli.lr,
         "dagger_rounds": args_cli.dagger_rounds,
+        "dagger_extra_rounds": args_cli.dagger_extra_rounds,
+        "dagger_estimator_ratio_initial": args_cli.dagger_est_ratio,
+        "dagger_estimator_ratio_final": args_cli.dagger_est_ratio_final,
+        "dagger_estimator_ratio_schedule": args_cli.dagger_est_ratio_schedule,
         "max_dataset_size": args_cli.max_dataset_size,
+        "dagger_max_samples_per_round": args_cli.max_dataset_size,
+        "dataset_aggregation": "uniform_random_subsample_after_each_round",
         "eval_episodes": args_cli.eval_episodes,
+        "max_episode_steps": args_cli.max_episode_steps,
+        "eval_seed_offset": args_cli.eval_seed_offset,
         "num_envs": args_cli.num_envs,
         "seed": args_cli.seed,
+        "device": args_cli.device,
         "dataset_cache": args_cli.dataset_cache,
         "dataset_cache_window": cache_window,
         "evaluation_domain_randomization": False,
         "evaluation_action_noise": 0.0,
     }
-    (output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    config_path = output / "config.json"
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     print("\nJOSE G1 estimator")
     print(f"  task={args_cli.task} adapter={args_cli.adapter} preset={args_cli.joint_preset}")
@@ -199,10 +216,15 @@ def main(env_cfg, agent_cfg):
                 max_samples=initial_sample_cap,
             )
             dataset = batch if dataset is None else dataset.append(batch, args_cli.max_dataset_size)
-            initial_collections.append({"action_noise": noise, **collection})
+            collection_duration = time.monotonic() - collection_started
+            initial_collections.append({
+                "action_noise": noise,
+                "duration_s": collection_duration,
+                **collection,
+            })
             log_event(
                 "phase1/collection", noise=noise, samples=len(batch.targets),
-                duration_s=round(time.monotonic() - collection_started, 3),
+                duration_s=round(collection_duration, 3),
             )
         if cache_path is not None:
             dataset.save(cache_path, cache_metadata)
@@ -226,6 +248,16 @@ def main(env_cfg, agent_cfg):
             "phase1/cache_projection", source_window=cache_window, target_window=window,
             joint_preset=args_cli.joint_preset, input_dim=dataset.frames.shape[-1],
         )
+    config["dataset"] = {
+        "initial_samples": len(dataset.targets),
+        "history_shape": list(dataset.histories.shape[1:]),
+        "target_dim": dataset.targets.shape[-1],
+        "frame_dim": dataset.frames.shape[-1],
+        "teacher_action_dim": dataset.teacher_actions.shape[-1],
+        "dtype": str(dataset.histories.dtype),
+        "bytes": sum(value.numel() * value.element_size() for value in dataset.__dict__.values()),
+    }
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     log_event("phase2/start", samples=len(dataset.targets), epochs=args_cli.epochs)
     epoch_offset = 0
 
@@ -233,6 +265,7 @@ def main(env_cfg, agent_cfg):
         step = epoch_offset + row["epoch"]
         writer.add_scalar("Loss/train_mse", row["train_mse"], step)
         writer.add_scalar("Loss/validation_mse", row["validation_mse"], step)
+        log_event("phase2/epoch", global_epoch=step, **row)
         print(
             f"  epoch {row['epoch']:03d}: train={row['train_mse']:.6f} "
             f"val={row['validation_mse']:.6f}", flush=True,
@@ -255,11 +288,20 @@ def main(env_cfg, agent_cfg):
         args_cli.max_episode_steps,
         args_cli.seed + args_cli.eval_seed_offset,
     )
-    rounds = [{"round": 0, "collection": initial_collections, "training": training, "evaluation": closed_loop}]
+    rounds = [{
+        "round": 0,
+        "dataset_size": len(dataset.targets),
+        "collection": initial_collections,
+        "training": training,
+        "evaluation": closed_loop,
+    }]
     for name, value in closed_loop.items():
         if isinstance(value, (int, float)):
             writer.add_scalar(f"Evaluation/{name}", value, 0)
-    log_event("evaluation", round=0, episode_length=closed_loop["episode_length_mean"], death_rate=closed_loop["death_rate"], rmse=closed_loop["rmse"])
+    log_event(
+        "evaluation", round=0,
+        **{key: value for key, value in closed_loop.items() if isinstance(value, (int, float))},
+    )
     best_score = (
         closed_loop["episode_length_mean"],
         -closed_loop["death_rate"],
@@ -293,14 +335,21 @@ def main(env_cfg, agent_cfg):
             action_noise=0.01,
             max_samples=args_cli.max_dataset_size,
         )
-        log_event("dagger/collection", round=round_index, samples=len(new_data.targets), duration_s=round(time.monotonic() - collection_started, 3))
+        collection_duration = time.monotonic() - collection_started
+        collection["duration_s"] = collection_duration
+        log_event(
+            "dagger/collection", round=round_index, samples=len(new_data.targets),
+            duration_s=round(collection_duration, 3),
+        )
         dataset = dataset.append(new_data, args_cli.max_dataset_size)
+        log_event("dagger/dataset", round=round_index, samples=len(dataset.targets))
         round_epoch_offset = epoch_offset
 
         def dagger_epoch_logger(row, round_index=round_index, round_epoch_offset=round_epoch_offset):
             step = round_epoch_offset + row["epoch"]
             writer.add_scalar("Loss/train_mse", row["train_mse"], step)
             writer.add_scalar("Loss/validation_mse", row["validation_mse"], step)
+            log_event("dagger/epoch", round=round_index, global_epoch=step, **row)
             print(
                 f"  round {round_index:02d} epoch {row['epoch']:03d}: "
                 f"train={row['train_mse']:.6f} val={row['validation_mse']:.6f}", flush=True,
@@ -331,6 +380,7 @@ def main(env_cfg, agent_cfg):
             {
                 "round": round_index,
                 "estimator_ratio": ratio,
+                "dataset_size": len(dataset.targets),
                 "collection": collection,
                 "training": training,
                 "evaluation": closed_loop,
@@ -341,7 +391,10 @@ def main(env_cfg, agent_cfg):
         for name, value in closed_loop.items():
             if isinstance(value, (int, float)):
                 writer.add_scalar(f"Evaluation/{name}", value, round_index)
-        log_event("evaluation", round=round_index, episode_length=closed_loop["episode_length_mean"], death_rate=closed_loop["death_rate"], rmse=closed_loop["rmse"])
+        log_event(
+            "evaluation", round=round_index,
+            **{key: value for key, value in closed_loop.items() if isinstance(value, (int, float))},
+        )
         score = (closed_loop["episode_length_mean"], -closed_loop["death_rate"], -closed_loop["rmse"])
         if score > best_score:
             best_score = score
@@ -412,8 +465,11 @@ def main(env_cfg, agent_cfg):
     )
     metrics["best_round"] = best_round
     metrics["rounds"] = rounds
+    metrics["wall_time_s"] = time.monotonic() - started
     save_jose_checkpoint(output / "best_estimator.pt", estimator, adapter, args_cli.task, window, metrics)
-    (output / "training.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (output / "training.json").write_text(
+        json.dumps({"config": config, "metrics": metrics}, indent=2), encoding="utf-8"
+    )
     print(
         f"  saved={output / 'best_estimator.pt'} best_round={best_round} "
         f"rmse={metrics['rmse']:.5f} r2={metrics['r2']:.4f}"

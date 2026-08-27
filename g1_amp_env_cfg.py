@@ -71,6 +71,7 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 
 @configclass
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
+    robot = G1AmpEnvCfg.robot.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
     reset_strategy = "default"
 
@@ -79,6 +80,7 @@ class G1AmpDanceEnvCfg(G1AmpEnvCfg):
 class G1AmpJumpEnvCfg(G1AmpEnvCfg):
     """SOLO-aligned AMP with the jump motion and a jump-safe pelvis threshold."""
 
+    robot = G1AmpEnvCfg.robot.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_jump.npz")
     reset_strategy = "random"
     termination_height = 0.20

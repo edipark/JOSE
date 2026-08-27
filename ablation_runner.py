@@ -28,7 +28,7 @@ try:
         normalize_experiments,
         write_json,
     )
-    from .reporting import generate_report
+    from .reporting import aggregate, generate_report
 except ImportError:
     from ablation_catalog import (
         CATALOG_FORMAT_VERSION,
@@ -38,7 +38,7 @@ except ImportError:
         normalize_experiments,
         write_json,
     )
-    from reporting import generate_report
+    from reporting import aggregate, generate_report
 
 
 TASKS = {
@@ -125,11 +125,31 @@ def _extract_metrics(training_json: Path) -> dict:
         return {}
     data = json.loads(training_json.read_text(encoding="utf-8"))
     source = data.get("metrics", data)
-    metrics = {key: value for key, value in source.items() if isinstance(value, (int, float))}
-    rounds = source.get("rounds", data.get("rounds", []))
+    if not isinstance(source, dict):
+        raise ValueError(f"Expected a JSON metrics object in {training_json}")
+    # Keep nested DAgger rounds, per-target errors, and representative traces.
+    # Reporting consumes these fields later to produce learning curves and
+    # target/trace plots; retaining only scalar metrics silently discarded them.
+    metrics = dict(source)
+    rounds = metrics.get("rounds", data.get("rounds", []))
     if isinstance(rounds, list):
+        metrics["rounds"] = rounds
         metrics["round_count"] = len(rounds)
     return metrics
+
+
+def _extract_run_config(training_json: Path) -> dict:
+    if not training_json.exists():
+        return {}
+    data = json.loads(training_json.read_text(encoding="utf-8"))
+    config = data.get("config", {}) if isinstance(data, dict) else {}
+    if isinstance(config, dict) and config:
+        return config
+    config_path = training_json.parent / "config.json"
+    if config_path.is_file():
+        fallback = json.loads(config_path.read_text(encoding="utf-8"))
+        return fallback if isinstance(fallback, dict) else {}
+    return {}
 
 
 def _run_live(command: list[str], log_path: Path) -> int:
@@ -161,7 +181,7 @@ def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> arg
     parser.add_argument("--collect-steps", type=int, default=2000, help="Estimator collection steps")
     parser.add_argument("--epochs", type=int, default=50, help="Initial estimator epochs")
     parser.add_argument("--dagger-epochs", type=int, default=10, help="Epochs per estimator DAgger round")
-    parser.add_argument("--max-dataset-size", type=int, default=500000)
+    parser.add_argument("--max-dataset-size", type=int, default=250000)
     parser.add_argument("--eval-episodes", type=int, default=200)
     parser.add_argument(
         "--experiments", nargs="+", choices=tuple(item.slug for item in experiments), default=None,
@@ -216,6 +236,8 @@ def _job_spec(
         "epochs": args.epochs,
         "dagger_epochs": args.dagger_epochs,
         "max_dataset_size": args.max_dataset_size,
+        "dagger_max_samples_per_round": args.max_dataset_size,
+        "dataset_aggregation": "uniform_random_subsample_after_each_round",
         "eval_episodes": args.eval_episodes,
         "dataset_cache_window": max(50, experiment.window),
     }
@@ -308,6 +330,91 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+def _write_intermediate_results(
+    path: Path,
+    *,
+    study_manifest: dict,
+    study_config: dict,
+    jobs: list[dict],
+    actions: dict[tuple[int, str], str],
+    failed: dict[tuple[int, str], dict],
+    status: str = "running",
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Atomically publish all currently available study results as one JSON object."""
+    rows: list[dict] = []
+    job_states: list[dict] = []
+    missing: list[dict] = []
+    for job in jobs:
+        key = (job["seed"], job["name"])
+        base = {
+            "seed": key[0],
+            "experiment": key[1],
+            "spec_digest": job["digest"],
+            "action": actions.get(key, "PENDING"),
+        }
+        if key in failed:
+            rows.append(failed[key])
+            job_states.append({**base, "status": "failed"})
+            missing.append({"seed": key[0], "experiment": key[1], "reason": "attempt_failed"})
+            continue
+        record = TeacherCatalog.read_complete(
+            job["entry"], require_checkpoint=job["experiment"] is not None
+        )
+        if record is None:
+            job_states.append({**base, "status": "missing"})
+            missing.append({"seed": key[0], "experiment": key[1], "reason": "not_complete"})
+            continue
+        study_record = dict(record)
+        study_record["catalog_action"] = actions.get(key, "REUSE_RESULT")
+        study_record["source_artifact"] = record.get("artifact")
+        rows.append(study_record)
+        job_states.append(
+            {
+                **base,
+                "status": "complete",
+                "source_artifact": record.get("artifact"),
+                **(
+                    {"eplen": record.get("metrics", {}).get("episode_length_mean")}
+                    if key[1] == "teacher_gt" else {}
+                ),
+            }
+        )
+
+    complete_count = sum(item["status"] == "complete" for item in job_states)
+    failed_count = sum(item["status"] == "failed" for item in job_states)
+    payload = {
+        "catalog_format_version": CATALOG_FORMAT_VERSION,
+        "kind": "ablation_intermediate_results",
+        "study": study_manifest["study"],
+        "run_id": study_manifest["run_id"],
+        "status": status,
+        "updated_at": datetime.now().isoformat(),
+        "teacher_id": study_manifest["teacher_id"],
+        "teacher": study_manifest["teacher"],
+        "task": study_manifest["task"],
+        "task_id": study_manifest["task_id"],
+        "config": study_config,
+        "progress": {
+            "total": len(jobs),
+            "complete": complete_count,
+            "failed": failed_count,
+            "missing": len(jobs) - complete_count - failed_count,
+        },
+        "jobs": job_states,
+        "results": rows,
+        "summary": aggregate(rows),
+    }
+    write_json(path, payload)
+    print(
+        "intermediate_result=" + json.dumps(
+            {"path": str(path), "status": status, **payload["progress"]},
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return rows, job_states, missing
+
+
 def main(
     experiments: tuple[AblationExperiment | tuple[str, str, int, str, int], ...],
     study_name: str,
@@ -388,6 +495,18 @@ def main(
             }
         )
 
+    study_config = {
+        "seeds": seeds,
+        "experiments": [item.slug for item in selected],
+        "num_envs": args.num_envs,
+        "collect_steps": args.collect_steps,
+        "initial_epochs": args.epochs,
+        "dagger_epochs": args.dagger_epochs,
+        "max_dataset_size": args.max_dataset_size,
+        "eval_episodes": args.eval_episodes,
+        "headless": args.headless,
+        "aggregation": "uniform_random_subsample_after_each_round",
+    }
     study_manifest = {
         "catalog_format_version": CATALOG_FORMAT_VERSION,
         "run_id": run_id,
@@ -398,6 +517,7 @@ def main(
         "task": args.task,
         "task_id": task_id,
         "created_at": datetime.now().isoformat(),
+        "config": study_config,
         "jobs": [
             {"seed": job["seed"], "experiment": job["name"], "spec_digest": job["digest"]}
             for job in jobs
@@ -426,6 +546,16 @@ def main(
 
     actions: dict[tuple[int, str], str] = {}
     failed: dict[tuple[int, str], dict] = {}
+    intermediate_path = study_output / "intermediate_results.json"
+    if not args.dry_run:
+        _write_intermediate_results(
+            intermediate_path,
+            study_manifest=study_manifest,
+            study_config=study_config,
+            jobs=jobs,
+            actions=actions,
+            failed=failed,
+        )
     start_all = time.monotonic()
     try:
         for index, job in enumerate(jobs, 1):
@@ -452,6 +582,14 @@ def main(
                 print(
                     f"[{index:03d}/{len(jobs):03d}] {args.task}/{name}/seed{seed} "
                     f"{action}{teacher_eplen} source={current.get('artifact')}", flush=True,
+                )
+                _write_intermediate_results(
+                    intermediate_path,
+                    study_manifest=study_manifest,
+                    study_config=study_config,
+                    jobs=jobs,
+                    actions=actions,
+                    failed=failed,
                 )
                 continue
 
@@ -519,6 +657,7 @@ def main(
                 continue
 
             started = time.monotonic()
+            started_at = datetime.now().isoformat()
             process_log = attempt / "process.log"
             returncode = _run_live(command, process_log)
             record = {
@@ -528,10 +667,13 @@ def main(
                 "teacher_fingerprint": teacher_fingerprint,
                 "experiment": name,
                 "seed": seed,
+                "started_at": started_at,
+                "finished_at": datetime.now().isoformat(),
                 "duration_s": time.monotonic() - started,
                 "returncode": returncode,
                 "status": "ok" if returncode == 0 and artifact.is_file() else "failed",
                 "process_log": str(process_log),
+                "command": command,
                 "artifact": str(artifact) if artifact.is_file() else None,
                 "catalog_action": "run",
                 "catalog_spec": job["spec"],
@@ -547,6 +689,7 @@ def main(
                 print(f"  FAILED ({returncode}); catalog entry remains incomplete", flush=True)
             else:
                 record["metrics"] = _extract_metrics(artifact)
+                record["run_config"] = _extract_run_config(artifact)
                 if name == "teacher_gt" and record["metrics"].get("episode_length_mean", 0.0) < 100.0:
                     print("  WARNING: teacher mean episode length < 100", flush=True)
                 if name == "teacher_gt":
@@ -563,49 +706,27 @@ def main(
             TeacherCatalog.write_attempt(
                 entry, attempt_id, record, make_current=record["status"] == "ok"
             )
+            _write_intermediate_results(
+                intermediate_path,
+                study_manifest=study_manifest,
+                study_config=study_config,
+                jobs=jobs,
+                actions=actions,
+                failed=failed,
+            )
 
         if args.dry_run:
             return
 
-        final_rows = []
-        missing = []
-        final_job_states = []
-        for job in jobs:
-            key = (job["seed"], job["name"])
-            if key in failed:
-                final_rows.append(failed[key])
-                missing.append({"seed": key[0], "experiment": key[1], "reason": "attempt_failed"})
-                final_job_states.append(
-                    {"seed": key[0], "experiment": key[1], "spec_digest": job["digest"], "status": "failed", "action": "RUN"}
-                )
-                continue
-            record = TeacherCatalog.read_complete(
-                job["entry"], require_checkpoint=job["experiment"] is not None
-            )
-            if record is None:
-                missing.append({"seed": key[0], "experiment": key[1], "reason": "not_complete"})
-                final_job_states.append(
-                    {"seed": key[0], "experiment": key[1], "spec_digest": job["digest"], "status": "missing", "action": actions.get(key, "RUN")}
-                )
-                continue
-            study_record = dict(record)
-            study_record["catalog_action"] = actions.get(key, "REUSE_RESULT")
-            study_record["source_artifact"] = record.get("artifact")
-            final_rows.append(study_record)
-            final_job_states.append(
-                {
-                    "seed": key[0],
-                    "experiment": key[1],
-                    "spec_digest": job["digest"],
-                    "status": "complete",
-                    "action": actions.get(key, "REUSE_RESULT"),
-                    "source_artifact": record.get("artifact"),
-                    **(
-                        {"eplen": record.get("metrics", {}).get("episode_length_mean")}
-                        if key[1] == "teacher_gt" else {}
-                    ),
-                }
-            )
+        final_rows, final_job_states, missing = _write_intermediate_results(
+            intermediate_path,
+            study_manifest=study_manifest,
+            study_config=study_config,
+            jobs=jobs,
+            actions=actions,
+            failed=failed,
+            status="finalizing",
+        )
 
         results_path = study_output / "results.jsonl"
         _write_jsonl(results_path, final_rows)
@@ -620,6 +741,15 @@ def main(
                 }
             )
             write_json(study_output / "manifest.json", study_manifest)
+            _write_intermediate_results(
+                intermediate_path,
+                study_manifest=study_manifest,
+                study_config=study_config,
+                jobs=jobs,
+                actions=actions,
+                failed=failed,
+                status="incomplete",
+            )
             print(
                 f"Catalog incomplete ({len(missing)} missing/failed); final report was not generated. "
                 f"study={study_output}", flush=True,
@@ -638,6 +768,15 @@ def main(
             }
         )
         write_json(study_output / "manifest.json", study_manifest)
+        _write_intermediate_results(
+            intermediate_path,
+            study_manifest=study_manifest,
+            study_config=study_config,
+            jobs=jobs,
+            actions=actions,
+            failed=failed,
+            status="complete",
+        )
         print(
             f"Catalog complete; finalized report={result['output']}/report.md "
             f"elapsed={(time.monotonic() - start_all) / 60:.1f}m", flush=True,

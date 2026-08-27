@@ -25,7 +25,7 @@ TASKS = {
     "jump": "Isaac-G1-AMP-Jump-JOSE-Direct-v0",
 }
 METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE")
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 def parse_cases(values: list[list[str]]) -> tuple[tuple[str, str], ...]:
@@ -56,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--collect-steps", type=int, default=2000)
     parser.add_argument("--estimator-epochs", type=int, default=50)
     parser.add_argument("--estimator-dagger-rounds", type=int, default=10)
+    parser.add_argument("--estimator-max-dataset-size", type=int, default=250000)
     parser.add_argument("--student-iterations", type=int, default=300)
     parser.add_argument("--student-rollout-steps", type=int, default=250)
     parser.add_argument("--student-train-steps", type=int, default=100)
@@ -154,6 +155,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
             "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
             "--dagger-rounds", str(args.estimator_dagger_rounds), "--estimator", "LSTM",
+            "--max-dataset-size", str(args.estimator_max_dataset_size),
             "--window", "50", "--joint-preset", "all", "--output-dir", str(run_root), "--run-name", name,
         ]
     if args.headless:
@@ -171,6 +173,7 @@ def main() -> None:
         args.collect_steps = 50
         args.estimator_epochs = 2
         args.estimator_dagger_rounds = 1
+        args.estimator_max_dataset_size = min(args.estimator_max_dataset_size, 20000)
         args.student_iterations = 2
         args.student_rollout_steps = 20
         args.student_train_steps = 5
@@ -180,6 +183,7 @@ def main() -> None:
         "version": FORMAT_VERSION, "cases": fingerprints, "seeds": args.seeds,
         "num_envs": args.num_envs, "collect_steps": args.collect_steps,
         "estimator_epochs": args.estimator_epochs, "estimator_dagger_rounds": args.estimator_dagger_rounds,
+        "estimator_max_dataset_size": args.estimator_max_dataset_size,
         "student_iterations": args.student_iterations, "student_rollout_steps": args.student_rollout_steps,
         "student_train_steps": args.student_train_steps, "eval_steps": args.eval_steps,
     }
@@ -202,13 +206,16 @@ def main() -> None:
             if args.dry_run:
                 continue
             started = time.monotonic()
+            started_at = datetime.now().isoformat()
             log = output / "process_logs" / f"{task}_{method}_seed{seed}.log"
             returncode = _run(command, log)
             row = {
                 "signature": signature, "task": task, "task_id": task, "experiment": method,
                 "seed": seed, "teacher_fingerprint": fingerprints[task], "returncode": returncode,
                 "status": "ok" if returncode == 0 else "failed", "duration_s": time.monotonic() - started,
+                "started_at": started_at, "finished_at": datetime.now().isoformat(),
                 "artifact": str(artifact) if artifact.exists() else None, "process_log": str(log),
+                "command": command,
             }
             if returncode == 0:
                 row["metrics"] = _metrics(artifact)

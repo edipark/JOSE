@@ -57,7 +57,10 @@ def main(env_cfg, agent_cfg):
     runner = Runner(env, agent_cfg)
     runner.agent.load(str(Path(args_cli.teacher_checkpoint).resolve()))
     adapter = make_policy_adapter(args_cli.adapter, env, "all")
+    collection_started = time.monotonic()
     _, metrics = collect_rollout(env, adapter, runner.agent, args_cli.collect_steps, window=1)
+    metrics["collection_duration_s"] = time.monotonic() - collection_started
+    metrics["collection_samples_per_s"] = metrics["samples"] / max(metrics["collection_duration_s"], 1.0e-9)
     observations, _ = env.reset()
     policy = getattr(runner.agent, "policy", None)
     if policy is None and hasattr(runner.agent, "models"):
@@ -84,7 +87,21 @@ def main(env_cfg, agent_cfg):
     )
     output = Path(args_cli.output_dir) / (args_cli.run_name or default_name)
     output.mkdir(parents=True, exist_ok=True)
-    (output / "training.json").write_text(json.dumps({"metrics": metrics}, indent=2), encoding="utf-8")
+    config = {
+        "teacher_checkpoint": str(Path(args_cli.teacher_checkpoint).resolve()),
+        "task": args_cli.task,
+        "agent": args_cli.agent,
+        "adapter": args_cli.adapter,
+        "num_envs": args_cli.num_envs,
+        "collect_steps": args_cli.collect_steps,
+        "seed": args_cli.seed,
+        "device": args_cli.device,
+        "evaluation_domain_randomization": False,
+        "evaluation_action_noise": 0.0,
+    }
+    (output / "training.json").write_text(
+        json.dumps({"config": config, "metrics": metrics}, indent=2), encoding="utf-8"
+    )
     print(
         f"TeacherGT eplen={metrics['episode_length_mean']:.2f} "
         f"return={metrics['return_mean']:.4f} success={metrics['success_rate']:.2f}%"
