@@ -46,6 +46,12 @@ TASKS = {
     "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     "ppo_walk": ("Isaac-G1-PPO-Walk-JOSE-Direct-v0", "ppo", "skrl_cfg_entry_point"),
+    # Manager-based walk teacher trained with rsl-rl; same estimator methodology.
+    "ppo_walk_manager": (
+        "Isaac-G1-PPO-Walk-Estimator-JOSE-v0",
+        "ppo_walk",
+        "rsl_rl_cfg_entry_point",
+    ),
 }
 
 TRAINING_IMPLEMENTATION = (
@@ -55,6 +61,7 @@ TRAINING_IMPLEMENTATION = (
     "estimator/models.py",
     "schema.py",
     "skrl_compat.py",
+    "teacher_setup.py",
     "g1_amp_env.py",
     "g1_amp_env_cfg.py",
     "task_math.py",
@@ -64,6 +71,7 @@ TEACHER_IMPLEMENTATION = (
     "estimator/adapters.py",
     "schema.py",
     "skrl_compat.py",
+    "teacher_setup.py",
     "g1_amp_env.py",
     "g1_amp_env_cfg.py",
     "task_math.py",
@@ -73,6 +81,16 @@ TASK_IMPLEMENTATION = {
     "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
     "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
     "ppo_walk": ("__init__.py", "g1_cfg.py", "g1_ppo_env.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_ppo_cfg.yaml"),
+    "ppo_walk_manager": (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+        "ppo_walk/mdp/curriculums.py",
+    ),
 }
 
 

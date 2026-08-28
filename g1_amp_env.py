@@ -200,6 +200,8 @@ class G1AmpEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        too_low = torch.zeros_like(time_out)
+        too_slow_window = torch.zeros_like(time_out)
         if self.cfg.early_termination:
             too_low = self.robot.data.body_pos_w[:, self.ref_body_index, 2] < self.cfg.termination_height
             vx = self.robot.data.body_lin_vel_w[:, self.ref_body_index, 0]
@@ -210,13 +212,15 @@ class G1AmpEnv(DirectRLEnv):
                 self._vel_window_count = torch.clamp(self._vel_window_count + 1, max=self.cfg.vel_window_steps)
                 window_full = self._vel_window_count >= self.cfg.vel_window_steps
                 too_slow_window = window_full & (self._vel_window_buf.mean(dim=1) < self.cfg.vel_window_min_vx)
-            else:
-                too_slow_window = torch.zeros_like(too_low)
             died = too_low | too_slow_window
         else:
             died = torch.zeros_like(time_out)
         log = self.extras.setdefault("log", {})
         log["episode/deaths"] = died.sum().float().detach()
+        log["episode/height_deaths"] = too_low.sum().float().detach()
+        log["episode/slow_velocity_deaths"] = (
+            too_slow_window & ~too_low
+        ).sum().float().detach()
         log["episode/timeouts"] = (time_out & ~died).sum().float().detach()
         self._log_completed_episode_metrics(died, time_out, log)
         return died, time_out

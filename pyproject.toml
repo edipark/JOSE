@@ -15,7 +15,11 @@ classifiers = [
 ]
 
 [tool.setuptools]
-packages = ["jose", "jose.agents", "jose.distillation", "jose.estimator", "jose.motions", "jose.tools"]
+packages = [
+  "jose", "jose.agents", "jose.distillation", "jose.estimator", "jose.motions", "jose.tools",
+  "jose.ppo_walk", "jose.ppo_walk.agents", "jose.ppo_walk.mdp", "jose.ppo_walk.mdp.commands",
+  "jose.ppo_walk.utils",
+]
 
 [tool.setuptools.package-dir]
 jose = "."
@@ -24,6 +28,11 @@ jose = "."
 "jose.estimator" = "estimator"
 "jose.motions" = "motions"
 "jose.tools" = "tools"
+"jose.ppo_walk" = "ppo_walk"
+"jose.ppo_walk.agents" = "ppo_walk/agents"
+"jose.ppo_walk.mdp" = "ppo_walk/mdp"
+"jose.ppo_walk.mdp.commands" = "ppo_walk/mdp/commands"
+"jose.ppo_walk.utils" = "ppo_walk/utils"
 
 [tool.setuptools.package-data]
 jose = [

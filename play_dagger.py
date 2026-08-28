@@ -17,6 +17,11 @@ parser.add_argument("--video-length", type=int, default=600)
 parser.add_argument("--video-dir", default="logs/jose_g1/videos/dagger")
 parser.add_argument("--real-time", action="store_true")
 parser.add_argument("--diagnostic-output", default=None)
+parser.add_argument(
+    "--keep-velocity-termination",
+    action="store_true",
+    help="Keep the training-time low-forward-velocity termination during play.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 if args_cli.video:
@@ -36,6 +41,7 @@ import isaaclab_tasks  # noqa: F401
 from jose.estimator.adapters import make_policy_adapter
 from jose.estimator.models import DaggerStudent, RunningNormalizer
 from jose.schema import G1_JOINT_NAMES, SCHEMA_VERSION
+from jose.skrl_compat import disable_velocity_termination_for_evaluation
 from jose.tools.rollout_diagnostics import RolloutDiagnostics, unwrap_env_with_robot
 
 
@@ -49,6 +55,8 @@ def main():
         raise ValueError("DAgger checkpoint does not use the canonical G1 29-DOF joint order")
     task = args_cli.task or checkpoint["task"]
     env_cfg = parse_env_cfg(task, device=args_cli.device, num_envs=args_cli.num_envs)
+    if not args_cli.keep_velocity_termination:
+        disable_velocity_termination_for_evaluation(env_cfg)
     raw_env = gym.make(task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     core = unwrap_env_with_robot(raw_env)
     if core is None:

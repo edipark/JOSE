@@ -540,6 +540,8 @@ def test_amp_environment_and_implicit_actuator_source():
     assert "action_finite_difference_penalties" in env_impl_source
     assert '"reward/action_rate_penalty_weighted"' in env_impl_source
     assert '"reward/action_second_difference_penalty_weighted"' in env_impl_source
+    assert '"episode/height_deaths"' in env_impl_source
+    assert '"episode/slow_velocity_deaths"' in env_impl_source
     assert "env_spacing=4.0" in env_source
     assert "GroundPlaneCfg" in env_impl_source
     assert "spawn_ground_plane" in env_impl_source
@@ -575,10 +577,8 @@ def test_skrl_2_yaml_and_style_scale():
             assert config["models"]["policy"]["min_log_std"] == pytest.approx(-3.5)
             assert config["models"]["policy"]["initial_log_std"] == pytest.approx(-1.2)
             assert config["models"]["policy"]["fixed_log_std"] is False
-            expected_timesteps = 200000 if path.name == "skrl_g1_walk_amp_cfg.yaml" else 80000
-            assert config["trainer"]["timesteps"] == expected_timesteps
-            expected_task_scale = 0.5 if "walk_amp" in path.name else 0.0
-            assert config["agent"]["task_reward_scale"] == pytest.approx(expected_task_scale)
+            assert config["trainer"]["timesteps"] == 100000
+            assert config["agent"]["task_reward_scale"] == pytest.approx(0.5)
             assert config["agent"]["style_reward_scale"] == pytest.approx(2.0)
             assert config["agent"]["discriminator_loss_scale"] == pytest.approx(6.0)
             assert config["models"]["policy"]["network"][0]["layers"] == [512, 256]
@@ -671,6 +671,19 @@ def test_force_skrl_reset_reenables_nested_reset_once_wrappers():
     compat.force_skrl_isaaclab_reset(outer)
     assert outer._reset_once is True
     assert inner._reset_once is True
+
+
+def test_evaluation_disables_only_velocity_termination():
+    env_cfg = SimpleNamespace(
+        early_termination=True,
+        termination_height=0.55,
+        vel_window_min_vx=0.01,
+    )
+    threshold = compat.disable_velocity_termination_for_evaluation(env_cfg)
+    assert threshold == pytest.approx(0.01)
+    assert env_cfg.vel_window_min_vx == 0.0
+    assert env_cfg.early_termination is True
+    assert env_cfg.termination_height == pytest.approx(0.55)
 
 
 def test_report_artifacts_and_failed_run(tmp_path):
