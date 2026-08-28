@@ -1,6 +1,6 @@
 """Reusable estimator, DAgger, collection, and policy-adapter components."""
 
-from .adapters import AmpPolicyAdapter, PpoPolicyAdapter, make_policy_adapter
+from .adapters import AmpPolicyAdapter, PpoPolicyAdapter, PpoWalkPolicyAdapter, make_policy_adapter
 from .models import (
     DaggerStudent,
     HistoryMLPStateEstimator,
@@ -13,6 +13,7 @@ from .models import (
 __all__ = [
     "AmpPolicyAdapter",
     "PpoPolicyAdapter",
+    "PpoWalkPolicyAdapter",
     "make_policy_adapter",
     "LSTMStateEstimator",
     "TCNStateEstimator",

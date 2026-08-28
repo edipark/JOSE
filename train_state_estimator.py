@@ -26,7 +26,7 @@ parser = argparse.ArgumentParser(description="JOSE G1 state-estimator training")
 parser.add_argument("--teacher_checkpoint", "--teacher-checkpoint", dest="teacher_checkpoint", required=True)
 parser.add_argument("--task", default="Isaac-G1-AMP-Walk-JOSE-Direct-v0")
 parser.add_argument("--agent_cfg_entry_point", "--agent", dest="agent", default="skrl_amp_cfg_entry_point")
-parser.add_argument("--adapter", choices=("amp", "ppo"), default="amp")
+parser.add_argument("--adapter", choices=("amp", "ppo", "ppo_walk"), default="amp")
 parser.add_argument("--joint_preset", "--joint-preset", dest="joint_preset", choices=("all", "legs", "upper"), default="all")
 parser.add_argument("--est_type", "--estimator", dest="estimator", choices=("LSTM", "TCN", "MLP", "HISTORY_MLP"), default="LSTM")
 parser.add_argument("--window", type=int, default=50)
@@ -59,17 +59,20 @@ parser.add_argument("--output_dir", "--output-dir", dest="output_dir", default="
 parser.add_argument("--run-name", default=None, help="Explicit output subdirectory name")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+from jose.teacher_setup import resolve_agent_entry_point  # noqa: E402
+
+# `--adapter ppo_walk` implies the rsl-rl runner config unless overridden.
+args_cli.agent = resolve_agent_entry_point(args_cli.adapter, args_cli.agent)
+
 sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym
 import torch
 import numpy as np
-from skrl.utils.runner.torch import Runner
 from torch.utils.tensorboard import SummaryWriter
 
-from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
@@ -85,25 +88,26 @@ from jose.estimator.pipeline import (
     train_estimator,
 )
 from jose.schema import JOINT_PRESETS, SCHEMA_VERSION
-from jose.skrl_compat import prepare_runner_config
+from jose.teacher_setup import build_env_and_teacher, teacher_policy_module
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg):
     torch.manual_seed(args_cli.seed)
     np.random.seed(args_cli.seed)
-    prepare_runner_config(agent_cfg)
-    agent_cfg["seed"] = args_cli.seed
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    env = SkrlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg), ml_framework="torch")
-    agent_cfg["trainer"]["close_environment_at_exit"] = False
-    agent_cfg["agent"]["experiment"]["write_interval"] = 0
-    agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
-    runner = Runner(env, agent_cfg)
     teacher_fingerprint = _checkpoint_fingerprint(args_cli.teacher_checkpoint)
-    runner.agent.load(teacher_fingerprint["path"])
+    env, teacher_agent = build_env_and_teacher(
+        args_cli.task,
+        args_cli.adapter,
+        env_cfg,
+        agent_cfg,
+        teacher_fingerprint["path"],
+        args_cli.device,
+        seed=args_cli.seed,
+    )
     adapter = make_policy_adapter(args_cli.adapter, env, args_cli.joint_preset)
     window = 1 if args_cli.estimator == "MLP" else args_cli.window
     cache_window = args_cli.dataset_cache_window or window
@@ -209,7 +213,7 @@ def main(env_cfg, agent_cfg):
             batch, collection = collect_rollout(
                 env,
                 cache_adapter,
-                runner.agent,
+                teacher_agent,
                 args_cli.collect_steps,
                 cache_window,
                 action_noise=noise,
@@ -280,7 +284,7 @@ def main(env_cfg, agent_cfg):
     closed_loop = evaluate_estimator_closed_loop(
         env,
         adapter,
-        runner.agent,
+        teacher_agent,
         estimator,
         args_cli.estimator,
         window,
@@ -327,7 +331,7 @@ def main(env_cfg, agent_cfg):
         new_data, collection = collect_rollout(
             env,
             adapter,
-            runner.agent,
+            teacher_agent,
             args_cli.collect_steps,
             window,
             estimator,
@@ -368,7 +372,7 @@ def main(env_cfg, agent_cfg):
         closed_loop = evaluate_estimator_closed_loop(
             env,
             adapter,
-            runner.agent,
+            teacher_agent,
             estimator,
             args_cli.estimator,
             window,
@@ -412,7 +416,7 @@ def main(env_cfg, agent_cfg):
     evaluation_data, _ = collect_rollout(
         env,
         adapter,
-        runner.agent,
+        teacher_agent,
         min(args_cli.collect_steps, 200),
         window,
         estimator,
@@ -428,9 +432,7 @@ def main(env_cfg, agent_cfg):
     )
     metrics.update(rounds[best_round]["evaluation"])
     metrics["estimator_parameters"] = metrics["parameters"]
-    policy = getattr(runner.agent, "policy", None)
-    if policy is None and hasattr(runner.agent, "models"):
-        policy = runner.agent.models.get("policy")
+    policy = teacher_policy_module(teacher_agent)
     metrics["teacher_policy_parameters"] = (
         sum(parameter.numel() for parameter in policy.parameters()) if policy is not None else 0
     )
@@ -447,7 +449,7 @@ def main(env_cfg, agent_cfg):
             sequence = benchmark_history.push(frame)
             model_input = frame if args_cli.estimator == "MLP" else sequence
             estimate = estimator.predict(model_input)
-            adapter.action(runner.agent, adapter.inject_estimate(benchmark_observations, estimate))
+            adapter.action(teacher_agent, adapter.inject_estimate(benchmark_observations, estimate))
         if str(args_cli.device).startswith("cuda"):
             torch.cuda.synchronize(args_cli.device)
         latency_started = time.perf_counter()
@@ -456,7 +458,7 @@ def main(env_cfg, agent_cfg):
             sequence = benchmark_history.push(frame)
             model_input = frame if args_cli.estimator == "MLP" else sequence
             estimate = estimator.predict(model_input)
-            adapter.action(runner.agent, adapter.inject_estimate(benchmark_observations, estimate))
+            adapter.action(teacher_agent, adapter.inject_estimate(benchmark_observations, estimate))
         if str(args_cli.device).startswith("cuda"):
             torch.cuda.synchronize(args_cli.device)
     metrics["inference_ms_per_sample"] = (

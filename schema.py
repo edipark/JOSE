@@ -172,3 +172,65 @@ def estimator_input_dim(preset: str = "all") -> int:
     if preset not in JOINT_PRESETS:
         raise ValueError(f"Unknown joint preset {preset!r}")
     return 2 * len(JOINT_PRESETS[preset])
+
+
+# Manager-based PPO walk layout. The policy group keeps a 5-step history and the
+# observation manager flattens each term's history separately (oldest first), so
+# the group is a concatenation of per-term blocks rather than per-frame records:
+#
+#   base_lin_vel(5x3)  base_ang_vel(5x3)  projected_gravity(5x3)
+#   velocity_commands(5x3)  joint_pos_rel(5x29)  joint_vel_rel(5x29)
+#   last_action(5x29)                                        = 495
+#
+# The estimator target indices below address the newest frame of the three base
+# state terms; the adapter widens them across the whole history at injection time.
+PPO_WALK_HISTORY_LENGTH = 5
+PPO_WALK_TERM_LAYOUT = (
+    # (name, per-frame dim, block start, observation scale applied by the manager)
+    ("base_lin_vel", 3, 0, 1.0),
+    ("base_ang_vel", 3, 15, 0.2),
+    ("projected_gravity", 3, 30, 1.0),
+    ("velocity_commands", 3, 45, 1.0),
+    ("joint_pos_rel", 29, 60, 1.0),
+    ("joint_vel_rel", 29, 205, 0.05),
+    ("last_action", 29, 350, 1.0),
+)
+PPO_WALK_ESTIMATOR_TERMS = ("base_lin_vel", "base_ang_vel", "projected_gravity")
+
+PPO_WALK_OBSERVATION_SCHEMA = ObservationSchema(
+    name="g1_ppo_walk_495",
+    policy_dim=495,
+    joint_position_start=176,  # newest frame of joint_pos_rel
+    joint_velocity_start=321,  # newest frame of joint_vel_rel
+    estimator_target_indices=(12, 13, 14, 27, 28, 29, 42, 43, 44),
+)
+
+
+def ppo_walk_history_target_indices() -> tuple[int, ...]:
+    """Every history slot of the three base-state terms, newest frame last.
+
+    Injecting only the newest frame would leave four frames of ground-truth
+    privileged state in the policy input, so closed-loop evaluation replaces the
+    complete history block of each estimated term.
+    """
+    layout = {name: (dim, start) for name, dim, start, _ in PPO_WALK_TERM_LAYOUT}
+    indices: list[int] = []
+    for frame in range(PPO_WALK_HISTORY_LENGTH):
+        for name in PPO_WALK_ESTIMATOR_TERMS:
+            dim, start = layout[name]
+            offset = start + frame * dim
+            indices.extend(range(offset, offset + dim))
+    return tuple(indices)
+
+
+def ppo_walk_target_scales() -> tuple[float, ...]:
+    """Observation scale of each of the 9 estimator target columns.
+
+    ``base_ang_vel`` is stored scaled by 0.2, so an estimate expressed in raw
+    units must be scaled the same way before it is written into the observation.
+    """
+    layout = {name: scale for name, _, _, scale in PPO_WALK_TERM_LAYOUT}
+    scales: list[float] = []
+    for name in PPO_WALK_ESTIMATOR_TERMS:
+        scales.extend([layout[name]] * 3)
+    return tuple(scales)
