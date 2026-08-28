@@ -189,6 +189,76 @@ def test_observation_schemas_round_trip():
     assert schema.ObservationSchema.from_dict(schema.AMP_OBSERVATION_SCHEMA.to_dict()) == schema.AMP_OBSERVATION_SCHEMA
 
 
+def test_ppo_walk_schema_matches_the_flattened_observation_layout():
+    """The layout table must tile the policy group exactly, with no gaps or overlap."""
+    offset = 0
+    for name, dim, start, _scale in schema.PPO_WALK_TERM_LAYOUT:
+        assert start == offset, f"{name} block starts at {start}, expected {offset}"
+        offset += dim * schema.PPO_WALK_HISTORY_LENGTH
+    assert offset == schema.PPO_WALK_OBSERVATION_SCHEMA.policy_dim == 495
+    assert schema.PPO_WALK_OBSERVATION_SCHEMA.estimator_target_dim == 9
+    assert (
+        schema.ObservationSchema.from_dict(schema.PPO_WALK_OBSERVATION_SCHEMA.to_dict())
+        == schema.PPO_WALK_OBSERVATION_SCHEMA
+    )
+    # The 9 schema indices address the newest frame of the three estimated terms.
+    layout = {name: (dim, start) for name, dim, start, _ in schema.PPO_WALK_TERM_LAYOUT}
+    newest = []
+    for name in schema.PPO_WALK_ESTIMATOR_TERMS:
+        dim, start = layout[name]
+        base = start + (schema.PPO_WALK_HISTORY_LENGTH - 1) * dim
+        newest.extend(range(base, base + dim))
+    assert schema.PPO_WALK_OBSERVATION_SCHEMA.estimator_target_indices == tuple(newest)
+    # joint_pos_rel / joint_vel_rel offsets also point at the newest frame.
+    for attr, term in (("joint_position_start", "joint_pos_rel"), ("joint_velocity_start", "joint_vel_rel")):
+        dim, start = layout[term]
+        expected = start + (schema.PPO_WALK_HISTORY_LENGTH - 1) * dim
+        assert getattr(schema.PPO_WALK_OBSERVATION_SCHEMA, attr) == expected
+
+
+def test_ppo_walk_history_indices_cover_every_estimated_frame():
+    indices = schema.ppo_walk_history_target_indices()
+    assert len(indices) == 9 * schema.PPO_WALK_HISTORY_LENGTH == 45
+    assert len(set(indices)) == len(indices)
+    assert max(indices) < schema.PPO_WALK_OBSERVATION_SCHEMA.policy_dim
+    # Newest frame last, so it coincides with the schema's own target indices.
+    assert indices[-9:] == schema.PPO_WALK_OBSERVATION_SCHEMA.estimator_target_indices
+    # Every slot must belong to one of the three estimated terms and nothing else.
+    layout = {name: (dim, start) for name, dim, start, _ in schema.PPO_WALK_TERM_LAYOUT}
+    allowed = set()
+    for name in schema.PPO_WALK_ESTIMATOR_TERMS:
+        dim, start = layout[name]
+        allowed.update(range(start, start + dim * schema.PPO_WALK_HISTORY_LENGTH))
+    assert set(indices) == allowed
+
+
+def test_ppo_walk_target_scales_follow_the_observation_terms():
+    """base_ang_vel is stored pre-scaled by 0.2, so estimates must be scaled to match."""
+    scales = schema.ppo_walk_target_scales()
+    assert scales == (1.0, 1.0, 1.0, 0.2, 0.2, 0.2, 1.0, 1.0, 1.0)
+    assert len(scales) == schema.PPO_WALK_OBSERVATION_SCHEMA.estimator_target_dim
+    declared = {name: scale for name, _, _, scale in schema.PPO_WALK_TERM_LAYOUT}
+    for i, name in enumerate(schema.PPO_WALK_ESTIMATOR_TERMS):
+        assert scales[3 * i : 3 * i + 3] == (declared[name],) * 3
+
+
+def test_ppo_walk_injection_replaces_the_whole_history_of_estimated_terms():
+    """Leaving old frames untouched would keep ground truth visible to the policy."""
+    indices = schema.ppo_walk_history_target_indices()
+    observations = torch.zeros(2, schema.PPO_WALK_OBSERVATION_SCHEMA.policy_dim)
+    observations[:] = 7.0
+    # Offset past the sentinel so no estimated value can coincide with it.
+    estimate = torch.arange(2 * len(indices), dtype=torch.float32).reshape(2, len(indices)) + 100.0
+    injected = task_math.inject_observation_estimate(observations, estimate, indices)
+    assert torch.equal(injected[:, list(indices)], estimate)
+    untouched = [i for i in range(observations.shape[1]) if i not in set(indices)]
+    assert torch.equal(injected[:, untouched], observations[:, untouched])
+    # No frame of an estimated term keeps its original value.
+    assert not (injected[:, list(indices)] == 7.0).any()
+    # The source tensor is not mutated.
+    assert torch.equal(observations, torch.full_like(observations, 7.0))
+
+
 def test_amp_estimator_replaces_all_privileged_columns_only():
     observations = torch.zeros(2, 101)
     observations[:, :58] = 7.0
