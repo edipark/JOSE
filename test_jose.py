@@ -346,6 +346,28 @@ def test_history_reset_and_sensor_corruption_contract():
     assert torch.allclose(gravity.norm(dim=-1), torch.ones(2))
 
 
+def test_history_rollout_samples_are_snapshotted_before_buffer_mutation():
+    buffer = history.ObservationHistory(1, 2, history.JOINT_FRAME_DIM, "cpu")
+    first = buffer.push(torch.zeros(1, history.JOINT_FRAME_DIM)).detach().clone()
+    second = buffer.push(torch.ones(1, history.JOINT_FRAME_DIM)).detach().clone()
+
+    assert first.data_ptr() != second.data_ptr()
+    assert torch.count_nonzero(first) == 0
+    assert torch.count_nonzero(second) == history.JOINT_FRAME_DIM
+
+    training_source = (JOSE_DIR / "train_history_student.py").read_text(encoding="utf-8")
+    assert "collected_x.append(flattened.detach().clone())" in training_source
+    assert "collected_y.append(teacher.detach().clone())" in training_source
+
+
+def test_history_distillation_uses_student_rollouts_and_teacher_labels():
+    training_source = (JOSE_DIR / "train_history_student.py").read_text(encoding="utf-8")
+    assert "action = predicted" in training_source
+    assert "collected_y.append(teacher.detach().clone())" in training_source
+    assert "beta * teacher" not in training_source
+    assert '"rollout_policy": "student"' in training_source
+
+
 def test_dagger_student_normalizer_and_replay_buffer():
     student = models.DaggerStudent()
     assert student(torch.randn(4, 58)).shape == (4, 29)
@@ -562,11 +584,15 @@ def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):
 def test_method_comparison_accepts_one_to_three_cases(tmp_path):
     script = JOSE_DIR / "run_method_comparison.py"
     result = subprocess.run(
-        [sys.executable, str(script), "--case", "walk", str(tmp_path / "walk.pt"), "--case", "jump", str(tmp_path / "jump.pt"), "--seeds", "7", "--dry-run", "--fast"],
+        [sys.executable, str(script), "--case", "walk", str(tmp_path / "walk.pt"), "--case", "jump", str(tmp_path / "jump.pt"), "--seeds", "7", "--output-dir", str(tmp_path / "ablation"), "--run-name", "paper_baseline", "--dry-run", "--fast"],
         check=True, capture_output=True, text=True,
     )
     assert "2 task(s), 1 seed(s), 8 jobs" in result.stdout
     assert all(method in result.stdout for method in ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE"))
+    assert "/studies/method_comparison/paper_baseline" in result.stdout
+    assert "/methods/imu_based_distillation/window_21/joints_all/seed_7" in result.stdout
+    assert "/methods/jose/window_50/joints_all/seed_7" in result.stdout
+    assert "logs/jose_g1/method_comparison" not in result.stdout
     failure = subprocess.run(
         [sys.executable, str(script), "--case", "walk", "x", "--case", "dance", "x", "--case", "jump", "x", "--case", "walk", "x", "--dry-run"],
         capture_output=True, text=True,

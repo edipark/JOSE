@@ -1,4 +1,4 @@
-"""Reproducible Teacher/IMU/Joint-only/JOSE comparison over 1--3 tasks."""
+"""Teacher-scoped Teacher/IMU/Joint-only/JOSE comparison over 1--3 tasks."""
 
 from __future__ import annotations
 
@@ -9,13 +9,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
 
 try:
+    from .ablation_catalog import TeacherCatalog, write_json
     from .reporting import generate_report
 except ImportError:
+    from ablation_catalog import TeacherCatalog, write_json
     from reporting import generate_report
 
 
@@ -25,7 +28,18 @@ TASKS = {
     "jump": "Isaac-G1-AMP-Jump-JOSE-Direct-v0",
 }
 METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE")
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
+CATALOG_TASKS = {
+    "Isaac-G1-AMP-Walk-JOSE-Direct-v0": "amp_walk",
+    "Isaac-G1-AMP-Dance-JOSE-Direct-v0": "amp_dance",
+    "Isaac-G1-AMP-Jump-JOSE-Direct-v0": "amp_jump",
+}
+METHOD_SLUGS = {
+    "PrivilegedTeacher": "privileged_teacher",
+    "IMU-BasedDistillation": "imu_based_distillation",
+    "Joint-OnlyDistillation": "joint_only_distillation",
+    "JOSE": "jose",
+}
 
 
 def parse_cases(values: list[list[str]]) -> tuple[tuple[str, str], ...]:
@@ -61,7 +75,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--student-rollout-steps", type=int, default=250)
     parser.add_argument("--student-train-steps", type=int, default=100)
     parser.add_argument("--eval-steps", type=int, default=600)
-    parser.add_argument("--output-dir", default="logs/jose_g1/method_comparison")
+    parser.add_argument("--output-dir", default="logs/jose_g1/ablation", help="Teacher catalog root")
+    parser.add_argument(
+        "--run-name", default=None,
+        help="Human-readable study id; supply the same value to resume a previous comparison",
+    )
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -80,6 +98,22 @@ def _fingerprint(path: str, dry_run: bool) -> dict:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return {"path": path, "size": target.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def _content_identity(fingerprint: dict) -> dict:
+    """Return the checkpoint identity without its location on disk."""
+    return {
+        key: fingerprint[key]
+        for key in ("size", "sha256", "exists")
+        if key in fingerprint
+    }
+
+
+def _slug(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
+    if not value:
+        raise ValueError("--run-name must contain at least one letter or number")
+    return value
 
 
 def _lock(path: Path):
@@ -130,6 +164,15 @@ def _metrics(path: Path) -> dict:
     return {key: value for key, value in metrics.items() if isinstance(value, (int, float, list, dict, bool))}
 
 
+def _method_output(method: str, seed: int, run_root: Path) -> Path:
+    output = run_root / "methods" / METHOD_SLUGS[method]
+    if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
+        output = output / "window_21" / "joints_all"
+    elif method == "JOSE":
+        output = output / "window_50" / "joints_all"
+    return output / f"seed_{seed}"
+
+
 def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Path) -> tuple[list[str], Path]:
     root = Path(__file__).parent
     common_student = [
@@ -138,13 +181,14 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         "--rollout-steps", str(args.student_rollout_steps), "--train-steps", str(args.student_train_steps),
         "--eval-steps", str(args.eval_steps),
     ]
-    name = f"{task}_{method}_seed{seed}"
-    output = run_root / name
+    output = _method_output(method, seed, run_root)
     if method == "PrivilegedTeacher":
         command = [
             sys.executable, str(root / "evaluate_teacher.py"), "--teacher-checkpoint", teacher,
-            "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
-            "--collect-steps", str(args.collect_steps), "--output-dir", str(run_root), "--run-name", name,
+            "--task", task, "--agent", "skrl_amp_cfg_entry_point", "--adapter", "amp",
+            "--seed", str(seed), "--num-envs", str(args.num_envs),
+            "--collect-steps", str(args.collect_steps), "--output-dir", str(output.parent),
+            "--run-name", output.name,
         ]
     elif method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
@@ -156,7 +200,8 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
             "--dagger-rounds", str(args.estimator_dagger_rounds), "--estimator", "LSTM",
             "--max-dataset-size", str(args.estimator_max_dataset_size),
-            "--window", "50", "--joint-preset", "all", "--output-dir", str(run_root), "--run-name", name,
+            "--window", "50", "--joint-preset", "all", "--output-dir", str(output.parent),
+            "--run-name", output.name,
         ]
     if args.headless:
         command.append("--headless")
@@ -180,7 +225,9 @@ def main() -> None:
         args.eval_steps = 50
     fingerprints = {task: _fingerprint(checkpoint, args.dry_run) for task, checkpoint in cases}
     signature_payload = {
-        "version": FORMAT_VERSION, "cases": fingerprints, "seeds": args.seeds,
+        "version": FORMAT_VERSION,
+        "cases": {task: _content_identity(value) for task, value in fingerprints.items()},
+        "seeds": args.seeds,
         "num_envs": args.num_envs, "collect_steps": args.collect_steps,
         "estimator_epochs": args.estimator_epochs, "estimator_dagger_rounds": args.estimator_dagger_rounds,
         "estimator_max_dataset_size": args.estimator_max_dataset_size,
@@ -188,26 +235,73 @@ def main() -> None:
         "student_train_steps": args.student_train_steps, "eval_steps": args.eval_steps,
     }
     signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True).encode()).hexdigest()[:16]
-    output = Path(args.output_dir).resolve() / signature
-    output.mkdir(parents=True, exist_ok=True)
-    lock = None if args.dry_run else _lock(output / ".active.lock")
-    raw = output / "raw_results.jsonl"
-    completed = _read_success(raw, signature) if args.resume else set()
+    output_root = Path(args.output_dir).resolve()
+    run_id = _slug(args.run_name) if args.run_name else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    studies: dict[str, Path] = {}
+    catalogs: dict[str, TeacherCatalog] = {}
+    for task, checkpoint in cases:
+        catalog = TeacherCatalog.open(
+            output_root, checkpoint, fingerprints[task], create=not args.dry_run
+        )
+        catalogs[task] = catalog
+        studies[task] = catalog.study_path(CATALOG_TASKS[task], "method_comparison", run_id)
+    if not args.dry_run:
+        for study in studies.values():
+            study.mkdir(parents=True, exist_ok=args.resume)
+            manifest_path = study / "manifest.json"
+            if manifest_path.exists():
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if existing.get("config_signature") != signature:
+                    raise RuntimeError(
+                        f"Study {study} already exists with a different configuration; "
+                        "choose another --run-name"
+                    )
+            else:
+                task = next(task for task, candidate in studies.items() if candidate == study)
+                write_json(
+                    manifest_path,
+                    {
+                        "catalog_format_version": 1,
+                        "study": "method_comparison",
+                        "run_id": run_id,
+                        "status": "running",
+                        "teacher_id": catalogs[task].teacher_root.name,
+                        "teacher": fingerprints[task],
+                        "task": CATALOG_TASKS[task],
+                        "task_id": task,
+                        "created_at": datetime.now().isoformat(),
+                        "config_signature": signature,
+                        "config": signature_payload,
+                    },
+                )
+    locks = [] if args.dry_run else [_lock(study / ".active.lock") for study in studies.values()]
+    raws = {task: study / "results.jsonl" for task, study in studies.items()}
+    completed = set()
+    if args.resume:
+        for raw in raws.values():
+            completed.update(_read_success(raw, signature))
     matrix = [(task, checkpoint, seed, method) for task, checkpoint in cases for seed in args.seeds for method in METHODS]
     print(f"JOSE 4-way comparison: {len(cases)} task(s), {len(args.seeds)} seed(s), {len(matrix)} jobs")
+    for task, study in studies.items():
+        print(f"teacher_catalog={catalogs[task].teacher_root}")
+        print(f"study={CATALOG_TASKS[task]}/method_comparison/{run_id} output={study}")
     try:
         for index, (task, teacher, seed, method) in enumerate(matrix, 1):
             key = (task, seed, method)
             if key in completed:
                 print(f"[{index}/{len(matrix)}] {task}/{method}/seed{seed} SKIP")
                 continue
-            command, artifact = _command(method, task, teacher, seed, args, output / "runs")
-            print(f"[{index}/{len(matrix)}] {task}/{method}/seed{seed}\n  $ {' '.join(command)}")
+            study = studies[task]
+            command, artifact = _command(method, task, teacher, seed, args, study)
+            print(
+                f"[{index}/{len(matrix)}] {task}/{method}/seed{seed} output={artifact.parent}"
+                f"\n  $ {' '.join(command)}"
+            )
             if args.dry_run:
                 continue
             started = time.monotonic()
             started_at = datetime.now().isoformat()
-            log = output / "process_logs" / f"{task}_{method}_seed{seed}.log"
+            log = _method_output(method, seed, study) / "process.log"
             returncode = _run(command, log)
             row = {
                 "signature": signature, "task": task, "task_id": task, "experiment": method,
@@ -221,20 +315,24 @@ def main() -> None:
                 row["metrics"] = _metrics(artifact)
             else:
                 row["error"] = log.read_text(encoding="utf-8", errors="replace")[-4000:]
-            with raw.open("a", encoding="utf-8") as stream:
+            with raws[task].open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row) + "\n")
         if not args.dry_run:
-            report_output = output / "report"
-            generate_report(raw, report_output, require_plots=True)
-            signature_record = {
-                **signature_payload,
-                "results": str(raw),
-                "report": str(report_output / "report.md"),
-            }
-            (output / "signature.json").write_text(json.dumps(signature_record, indent=2), encoding="utf-8")
-            print(f"Comparison complete: {report_output / 'report.md'}")
+            for task, study in studies.items():
+                report_output = study / "report"
+                generate_report(raws[task], report_output, require_plots=True)
+                manifest_path = study / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest.update({
+                    "status": "complete",
+                    "finished_at": datetime.now().isoformat(),
+                    "results": str(raws[task]),
+                    "report": str(report_output / "report.md"),
+                })
+                write_json(manifest_path, manifest)
+                print(f"Comparison complete: {report_output / 'report.md'}")
     finally:
-        if lock is not None:
+        for lock in locks:
             lock.close()
 
 
