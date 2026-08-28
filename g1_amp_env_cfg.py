@@ -75,6 +75,8 @@ class G1AmpDanceEnvCfg(G1AmpEnvCfg):
     robot = G1_AMP_ROBOT_CFG.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
     reset_strategy = "default"
+    vel_window_min_vx = 0.01
+    vel_window_steps = 50
 
 
 @configclass
@@ -85,3 +87,5 @@ class G1AmpJumpEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_jump.npz")
     reset_strategy = "random"
     termination_height = 0.20
+    vel_window_min_vx = 0.01
+    vel_window_steps = 50

@@ -310,7 +310,7 @@ To run only one experiment, pass its canonical name:
 ```bash
 python -m jose.run_architecture_ablation \
   --teacher-checkpoint "$TEACHER" \
-  --experiments lstm_w50_all \
+  --experiments lstm_w25_all \
   --dry-run
 ```
 
@@ -335,7 +335,7 @@ logs/jose_g1/ablation/
 logs/jose_g1/method_comparison/
 ```
 
-Completed jobs are reused when you restart the same study. A finished report contains JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a study is running.
+Completed jobs are reused when you restart the same study. A finished report contains JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a study is running; every completed `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the final `manifest.json`.
 
 ## Motion tools
 

@@ -37,9 +37,9 @@ class AblationExperiment:
 
 TEACHER_EXPERIMENT = AblationExperiment("TEACHER", 1, "all", 0)
 ARCHITECTURE_EXPERIMENTS = (
-    AblationExperiment("LSTM", 50, "all"),
-    AblationExperiment("TCN", 50, "all"),
-    AblationExperiment("HISTORY_MLP", 50, "all"),
+    AblationExperiment("LSTM", 25, "all"),
+    AblationExperiment("TCN", 25, "all"),
+    AblationExperiment("HISTORY_MLP", 25, "all"),
 )
 JOINT_SCOPE_EXPERIMENTS = (
     AblationExperiment("LSTM", 50, "all"),

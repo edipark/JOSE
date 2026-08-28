@@ -1,4 +1,4 @@
-"""Estimator architecture ablation: one teacher, all joints, window 50."""
+"""Estimator architecture ablation: one teacher, all joints, window 25."""
 
 try:
     from .ablation_runner import main

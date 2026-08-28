@@ -373,10 +373,7 @@ def _write_intermediate_results(
                 **base,
                 "status": "complete",
                 "source_artifact": record.get("artifact"),
-                **(
-                    {"eplen": record.get("metrics", {}).get("episode_length_mean")}
-                    if key[1] == "teacher_gt" else {}
-                ),
+                "eplen": record.get("metrics", {}).get("episode_length_mean"),
             }
         )
 
@@ -405,6 +402,10 @@ def _write_intermediate_results(
         "summary": aggregate(rows),
     }
     write_json(path, payload)
+    # Keep the compact job view in the manifest identical to the intermediate
+    # result while the study is running as well as after finalization.
+    study_manifest["jobs"] = job_states
+    write_json(path.parent / "manifest.json", study_manifest)
     print(
         "intermediate_result=" + json.dumps(
             {"path": str(path), "status": status, **payload["progress"]},
@@ -573,15 +574,14 @@ def main(
             if current is not None and not args.rerun:
                 action = actions.get((seed, name), "REUSE_RESULT")
                 actions[(seed, name)] = action
-                teacher_eplen = (
+                result_eplen = (
                     f" eplen={current.get('metrics', {}).get('episode_length_mean'):.2f}"
-                    if name == "teacher_gt"
-                    and isinstance(current.get("metrics", {}).get("episode_length_mean"), (int, float))
+                    if isinstance(current.get("metrics", {}).get("episode_length_mean"), (int, float))
                     else ""
                 )
                 print(
                     f"[{index:03d}/{len(jobs):03d}] {args.task}/{name}/seed{seed} "
-                    f"{action}{teacher_eplen} source={current.get('artifact')}", flush=True,
+                    f"{action}{result_eplen} source={current.get('artifact')}", flush=True,
                 )
                 _write_intermediate_results(
                     intermediate_path,
