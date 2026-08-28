@@ -20,6 +20,18 @@ PRIMARY_METRICS = (
     "wall_time_s", "collection_duration_s", "collection_samples_per_s",
 )
 
+REQUIRED_REPORT_FILES = (
+    "summary.json", "summary.csv", "results_tidy.csv", "table.md", "table.tex", "report.md",
+)
+REQUIRED_PLOT_FILES = tuple(
+    f"{stem}.{suffix}"
+    for stem in (
+        "episode_length_mean", "death_rate", "timeout_rate", "return_mean", "rmse", "pareto",
+        "target_rmse_heatmap", "dagger_learning_curve", "representative_trace",
+    )
+    for suffix in ("png", "pdf")
+)
+
 
 def read_jsonl(path: str | Path) -> list[dict]:
     rows = []
@@ -234,7 +246,9 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
     return artifacts
 
 
-def generate_report(raw_jsonl: str | Path, output_dir: str | Path) -> dict:
+def generate_report(
+    raw_jsonl: str | Path, output_dir: str | Path, *, require_plots: bool = False
+) -> dict:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     raw_rows = read_jsonl(raw_jsonl)
@@ -250,6 +264,9 @@ def generate_report(raw_jsonl: str | Path, output_dir: str | Path) -> dict:
     try:
         plots = _plots(output, summary, raw_rows)
         plot_error = None
+        unavailable = output / "PLOTS_UNAVAILABLE.txt"
+        if unavailable.exists():
+            unavailable.unlink()
     except ImportError as exc:
         plots = []
         plot_error = str(exc)
@@ -266,4 +283,14 @@ def generate_report(raw_jsonl: str | Path, output_dir: str | Path) -> dict:
     if failures:
         report.extend(("", "## Failed runs", "", *[f"- {row.get('task')}/{row.get('experiment')}/seed{row.get('seed')}: {row.get('error')}" for row in failures]))
     (output / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
-    return {"runs": len(raw_rows), "failures": len(failures), "plots": plots, "output": str(output)}
+    missing = [name for name in REQUIRED_REPORT_FILES if not (output / name).is_file()]
+    if require_plots:
+        missing.extend(name for name in REQUIRED_PLOT_FILES if not (output / name).is_file())
+    if missing:
+        raise RuntimeError(f"Report generation omitted required artifacts: {missing}")
+    return {
+        "runs": len(raw_rows), "failures": len(failures), "plots": plots,
+        "required_files": list(REQUIRED_REPORT_FILES),
+        "required_plots": list(REQUIRED_PLOT_FILES) if require_plots else [],
+        "output": str(output),
+    }

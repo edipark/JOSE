@@ -330,6 +330,16 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+def _result_eplen(record: dict, *, seed: int, experiment: str) -> float:
+    value = record.get("metrics", {}).get("episode_length_mean")
+    if not isinstance(value, (int, float)):
+        raise ValueError(
+            f"Complete catalog result is missing numeric episode_length_mean: "
+            f"{experiment}/seed{seed}"
+        )
+    return float(value)
+
+
 def _write_intermediate_results(
     path: Path,
     *,
@@ -368,12 +378,13 @@ def _write_intermediate_results(
         study_record["catalog_action"] = actions.get(key, "REUSE_RESULT")
         study_record["source_artifact"] = record.get("artifact")
         rows.append(study_record)
+        eplen = _result_eplen(record, seed=key[0], experiment=key[1])
         job_states.append(
             {
                 **base,
                 "status": "complete",
                 "source_artifact": record.get("artifact"),
-                "eplen": record.get("metrics", {}).get("episode_length_mean"),
+                "eplen": eplen,
             }
         )
 
@@ -574,14 +585,10 @@ def main(
             if current is not None and not args.rerun:
                 action = actions.get((seed, name), "REUSE_RESULT")
                 actions[(seed, name)] = action
-                result_eplen = (
-                    f" eplen={current.get('metrics', {}).get('episode_length_mean'):.2f}"
-                    if isinstance(current.get("metrics", {}).get("episode_length_mean"), (int, float))
-                    else ""
-                )
+                result_eplen = _result_eplen(current, seed=seed, experiment=name)
                 print(
                     f"[{index:03d}/{len(jobs):03d}] {args.task}/{name}/seed{seed} "
-                    f"{action}{result_eplen} source={current.get('artifact')}", flush=True,
+                    f"{action} eplen={result_eplen:.2f} source={current.get('artifact')}", flush=True,
                 )
                 _write_intermediate_results(
                     intermediate_path,
@@ -757,7 +764,7 @@ def main(
             raise RuntimeError("Ablation catalog is incomplete; rerun to fill the missing entries")
 
         report_output = study_output / "report"
-        result = generate_report(results_path, report_output)
+        result = generate_report(results_path, report_output, require_plots=True)
         study_manifest.update(
             {
                 "status": "complete",

@@ -298,6 +298,8 @@ python -m jose.run_window_ablation \
 
 ### Compare joint groups
 
+Joint-scope comparisons use the LSTM estimator with a fixed window of 25.
+
 ```bash
 python -m jose.run_joint_scope_ablation \
   --teacher-checkpoint "$TEACHER" \
@@ -335,7 +337,7 @@ logs/jose_g1/ablation/
 logs/jose_g1/method_comparison/
 ```
 
-Completed jobs are reused when you restart the same study. A finished report contains JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a study is running; every completed `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the final `manifest.json`.
+Completed jobs are reused when you restart the same study. Architecture, window, joint-scope, and method comparisons all write the same report bundle under their run's `report/` directory: JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a catalog study is running; every completed `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the final `manifest.json`.
 
 ## Motion tools
 

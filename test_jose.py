@@ -365,7 +365,9 @@ def test_ablation_factors_are_isolated_and_window_is_configurable(tmp_path):
         [sys.executable, str(JOSE_DIR / "run_joint_scope_ablation.py"), *common],
         check=True, capture_output=True, text=True,
     ).stdout
-    assert {line.split("--joint_preset ", 1)[1].split()[0] for line in scope.splitlines() if "train_state_estimator.py" in line} == {"all", "legs", "upper"}
+    scope_commands = [line for line in scope.splitlines() if "train_state_estimator.py" in line]
+    assert {line.split("--joint_preset ", 1)[1].split()[0] for line in scope_commands} == {"all", "legs", "upper"}
+    assert all("--est_type LSTM --window 25" in line for line in scope_commands)
 
 
 def test_window_defaults_and_validation():
@@ -436,11 +438,22 @@ def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):
         entry = Path(attempt).parent.parent
         artifact = tmp_path / f"{name}_artifact" / "training.json"
         artifact.parent.mkdir()
-        metrics = {"episode_length_mean": 100.0, "rmse": 0.1}
+        metrics = {
+            "episode_length_mean": 100.0,
+            "episode_length_std": 0.0,
+            "return_mean": 10.0,
+            "death_rate": 0.0,
+            "timeout_rate": 100.0,
+            "rmse": 0.1,
+            "r2": 0.9,
+            "inference_ms_per_sample": 0.01,
+        }
         if name == "lstm_w25_all":
             metrics.update({
                 "target_rmse": [0.1, 0.2],
                 "rounds": [{"round": 0, "training": {"best_validation_mse": 0.25}}],
+                "trace_target": [[0.0, 1.0], [1.0, 0.0]],
+                "trace_prediction": [[0.1, 0.9], [0.9, 0.1]],
             })
         artifact.write_text(json.dumps({"metrics": metrics}))
         if name != "teacher_gt":
@@ -711,6 +724,7 @@ def test_report_artifacts_and_failed_run(tmp_path):
     raw.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     result = reporting.generate_report(raw, tmp_path / "report")
     assert result["runs"] == 3 and result["failures"] == 1
+    assert result["required_files"] == list(reporting.REQUIRED_REPORT_FILES)
     for name in ("summary.json", "summary.csv", "results_tidy.csv", "table.md", "table.tex", "report.md"):
         assert (tmp_path / "report" / name).is_file()
     assert "synthetic failure" in (tmp_path / "report" / "report.md").read_text(encoding="utf-8")

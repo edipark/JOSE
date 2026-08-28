@@ -224,9 +224,15 @@ def main() -> None:
             with raw.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row) + "\n")
         if not args.dry_run:
-            generate_report(raw, output)
-            (output / "signature.json").write_text(json.dumps(signature_payload, indent=2), encoding="utf-8")
-            print(f"Comparison complete: {output / 'report.md'}")
+            report_output = output / "report"
+            generate_report(raw, report_output, require_plots=True)
+            signature_record = {
+                **signature_payload,
+                "results": str(raw),
+                "report": str(report_output / "report.md"),
+            }
+            (output / "signature.json").write_text(json.dumps(signature_record, indent=2), encoding="utf-8")
+            print(f"Comparison complete: {report_output / 'report.md'}")
     finally:
         if lock is not None:
             lock.close()

@@ -42,9 +42,9 @@ ARCHITECTURE_EXPERIMENTS = (
     AblationExperiment("HISTORY_MLP", 25, "all"),
 )
 JOINT_SCOPE_EXPERIMENTS = (
-    AblationExperiment("LSTM", 50, "all"),
-    AblationExperiment("LSTM", 50, "legs"),
-    AblationExperiment("LSTM", 50, "upper"),
+    AblationExperiment("LSTM", 25, "all"),
+    AblationExperiment("LSTM", 25, "legs"),
+    AblationExperiment("LSTM", 25, "upper"),
 )
 
 

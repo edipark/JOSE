@@ -1,4 +1,4 @@
-"""Estimator joint-scope ablation: one teacher, LSTM, window 50."""
+"""Estimator joint-scope ablation: one teacher, LSTM, window 25."""
 
 try:
     from .ablation_runner import main
