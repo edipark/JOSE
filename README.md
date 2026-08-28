@@ -496,14 +496,27 @@ python -m jose.run_method_comparison \
   --headless
 ```
 
-Default output directories:
+All comparison and ablation studies are grouped by the content identity of the
+teacher checkpoint:
 
 ```text
-logs/jose_g1/ablation/
-logs/jose_g1/method_comparison/
+logs/jose_g1/ablation/<teacher>__<checkpoint>/<task>/studies/
+  architecture/<date>/
+  window/<date>/
+  joint_scope/<date>/
+  method_comparison/<date>/methods/<method>/window_<N>/joints_<scope>/seed_<N>/
 ```
 
-Completed jobs are reused when you restart the same study. Architecture, window, joint-scope, and method comparisons all write the same report bundle under their run's `report/` directory: JSON and CSV results, Markdown and LaTeX tables, and PNG and PDF plots. Check `intermediate_results.json` while a catalog study is running; every completed `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the final `manifest.json`.
+Pass `--run-name <name>` to `run_method_comparison` when a stable,
+human-readable study name is preferred or when resuming that exact study.
+
+Completed jobs are reused when you restart the same named study. Architecture,
+window, joint-scope, and method comparisons all write the same report bundle
+under their run's `report/` directory: JSON and CSV results, Markdown and LaTeX
+tables, and PNG and PDF plots. For estimator ablations, check
+`intermediate_results.json` while a catalog study is running; every completed
+`jobs[]` entry exposes its mean episode length directly as `eplen`, matching the
+final `manifest.json`.
 
 ## Motion tools
 

@@ -1,8 +1,10 @@
-"""Train joint-only or IMU-based 21-frame policies with DAgger.
+"""Train joint-only or IMU-based history policies with action DAgger.
 
-Both baselines use the same model, normalization, replay, optimizer, beta
-schedule, and budget. Their only experimental difference is the six deployable
-IMU channels in the per-frame observation.
+Following the deployable-student protocol used by OmniH2O, the student controls
+every rollout and the frozen privileged teacher labels the states visited by
+that student. Both baselines use the same model, normalization, replay,
+optimizer, and budget; their only experimental difference is the six
+deployable IMU channels in the per-frame observation.
 """
 
 from __future__ import annotations
@@ -27,9 +29,6 @@ parser.add_argument("--train-steps", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=1.0e-4)
 parser.add_argument("--weight-decay", type=float, default=1.0e-4)
-parser.add_argument("--beta-init", type=float, default=1.0)
-parser.add_argument("--beta-decay", type=float, default=0.998)
-parser.add_argument("--beta-min", type=float, default=0.02)
 parser.add_argument("--buffer-capacity", type=int, default=200_000)
 parser.add_argument("--eval-interval", type=int, default=20)
 parser.add_argument("--eval-steps", type=int, default=600)
@@ -72,7 +71,7 @@ from jose.distillation.history import (
 )
 from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, SensorCorruptor
 from jose.estimator.adapters import make_policy_adapter
-from jose.estimator.models import ReplayBuffer, RunningNormalizer, dagger_beta
+from jose.estimator.models import ReplayBuffer, RunningNormalizer
 from jose.schema import SCHEMA_VERSION
 from jose.skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, prepare_runner_config, require_skrl_2
 
@@ -128,8 +127,6 @@ def main(env_cfg, agent_cfg):
     observation_normalizer = RunningNormalizer(student.input_dim, device)
     action_normalizer = RunningNormalizer(29, device, clip=10.0)
     replay = ReplayBuffer(args_cli.buffer_capacity, student.input_dim, 29, device)
-    beta = dagger_beta(args_cli.beta_init, args_cli.beta_decay, args_cli.beta_min, 0)
-
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = Path(args_cli.log_dir or f"logs/jose_g1/distillation/{args_cli.method}/{timestamp}").resolve()
     checkpoints = log_dir / "checkpoints"
@@ -173,7 +170,8 @@ def main(env_cfg, agent_cfg):
             "adapter": args_cli.adapter,
             "skrl_version": require_skrl_2(),
             "iteration": iteration,
-            "beta": beta,
+            "distillation_protocol": "student_rollout_teacher_action_labels",
+            "rollout_policy": "student",
             "model_config": student.config(),
             "model_state_dict": student.state_dict(),
             "observation_normalizer": observation_normalizer.state_dict(),
@@ -294,9 +292,15 @@ def main(env_cfg, agent_cfg):
                     teacher = adapter.action(runner.agent, observations)
                     predicted = action_normalizer.denormalize(student(observation_normalizer.normalize(flattened)))
                 action_normalizer.update(teacher)
-                action = beta * teacher + (1.0 - beta) * predicted
-                collected_x.append(flattened.detach())
-                collected_y.append(teacher.detach())
+                # OmniH2O-style on-policy DAgger: the deployable student owns
+                # the trajectory; the privileged teacher is only an oracle for
+                # labels at states that the student actually visits.
+                action = predicted
+                # ``flattened`` is a view of the in-place history ring. Snapshot
+                # both sides before the next environment step mutates any
+                # rollout-owned storage.
+                collected_x.append(flattened.detach().clone())
+                collected_y.append(teacher.detach().clone())
                 observations, _, terminated, truncated, _ = env.step(action)
                 done = (terminated | truncated).flatten()
                 if done.any():
@@ -317,16 +321,14 @@ def main(env_cfg, agent_cfg):
                 nn.utils.clip_grad_norm_(student.parameters(), 1.0)
                 optimizer.step()
                 loss_total += float(loss)
-            beta = dagger_beta(args_cli.beta_init, args_cli.beta_decay, args_cli.beta_min, iteration)
             scheduler.step()
             writer.add_scalar("Loss/mse", loss_total / train_steps, iteration)
-            writer.add_scalar("Metric/beta", beta, iteration)
             save(iteration, "student_latest.pt")
             if iteration % args_cli.save_interval == 0:
                 save(iteration, f"student_iter_{iteration:05d}.pt")
             print(
                 f"[{args_cli.method} {iteration:04d}/{args_cli.num_iterations}] "
-                f"loss={loss_total / train_steps:.6f} beta={beta:.4f} buffer={replay.size:,} "
+                f"loss={loss_total / train_steps:.6f} rollout=student buffer={replay.size:,} "
                 f"elapsed={time.monotonic() - started:.0f}s",
                 flush=True,
             )
@@ -354,6 +356,8 @@ def main(env_cfg, agent_cfg):
         "window": args_cli.window,
         "frame_dim": frame_dim,
         "input_dim": student.input_dim,
+        "distillation_protocol": "student_rollout_teacher_action_labels",
+        "rollout_policy": "student",
         "explicit_linear_velocity": False,
         "sensor_corruption": corruption_cfg.__dict__,
     }
