@@ -63,6 +63,11 @@ parser.add_argument("--print-base-velocity", action="store_true", help="Print wo
 parser.add_argument("--print-base-velocity-interval", type=int, default=30)
 parser.add_argument("--print-base-velocity-env", type=int, default=0)
 parser.add_argument("--print-base-angular", action="store_true", help="Also print base angular velocity.")
+parser.add_argument(
+    "--keep-velocity-termination",
+    action="store_true",
+    help="Keep the training-time low-forward-velocity termination during play.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -121,9 +126,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 try:
     from jose.tools.rollout_diagnostics import RolloutDiagnostics, unwrap_env_with_robot
+    from jose.skrl_compat import disable_velocity_termination_for_evaluation
 except ImportError:
     RolloutDiagnostics = None
     unwrap_env_with_robot = None
+    disable_velocity_termination_for_evaluation = None
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -146,6 +153,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if not args_cli.keep_velocity_termination and disable_velocity_termination_for_evaluation is not None:
+        threshold = disable_velocity_termination_for_evaluation(env_cfg)
+        if threshold is not None and threshold > 0.0:
+            print(
+                f"[INFO] Disabled low-velocity termination for play "
+                f"(training threshold: {threshold:g} m/s); height termination remains enabled."
+            )
 
     # configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):

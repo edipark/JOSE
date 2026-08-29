@@ -14,7 +14,7 @@ parser.add_argument("--estimator-checkpoint", default=None)
 parser.add_argument("--replay-action-log", default=None)
 parser.add_argument("--task", default="Isaac-G1-AMP-Walk-JOSE-Direct-v0")
 parser.add_argument("--agent", default="skrl_amp_cfg_entry_point")
-parser.add_argument("--adapter", choices=("amp", "ppo"), default="amp")
+parser.add_argument("--adapter", choices=("amp", "ppo", "ppo_walk"), default="amp")
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--steps", type=int, default=1000)
 parser.add_argument("--video", action="store_true")
@@ -25,12 +25,22 @@ parser.add_argument("--csv-output", default=None)
 parser.add_argument("--action-log-output", default=None)
 parser.add_argument("--log-env-id", type=int, default=0)
 parser.add_argument("--diagnostic-output", default=None)
+parser.add_argument(
+    "--keep-velocity-termination",
+    action="store_true",
+    help="Keep the training-time low-forward-velocity termination during play.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 if args_cli.replay_action_log is None and (not args_cli.teacher_checkpoint or not args_cli.estimator_checkpoint):
     parser.error("teacher and estimator checkpoints are required unless --replay-action-log is used")
+from jose.teacher_setup import resolve_agent_entry_point  # noqa: E402
+
+# `--adapter ppo_walk` implies the rsl-rl runner config unless overridden.
+args_cli.agent = resolve_agent_entry_point(args_cli.adapter, args_cli.agent)
+
 sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -42,45 +52,52 @@ import time
 import gymnasium as gym
 import numpy as np
 import torch
-from skrl.utils.runner.torch import Runner
 
-from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
 from jose.estimator.adapters import make_policy_adapter
 from jose.estimator.pipeline import HistoryBuffer, load_estimator
-from jose.skrl_compat import prepare_runner_config
+from jose.skrl_compat import disable_velocity_termination_for_evaluation
+from jose.teacher_setup import build_env_and_teacher, uses_rsl_rl
 from jose.tools.rollout_diagnostics import RolloutDiagnostics, unwrap_env_with_robot
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg):
-    prepare_runner_config(agent_cfg)
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
-    raw_env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-    core = unwrap_env_with_robot(raw_env)
-    if core is None:
-        raise RuntimeError("Unable to find the G1 DirectRLEnv")
-    if args_cli.video:
-        raw_env = gym.wrappers.RecordVideo(
+    if not args_cli.keep_velocity_termination:
+        disable_velocity_termination_for_evaluation(env_cfg)
+
+    def wrap_raw(raw_env):
+        if not args_cli.video:
+            return raw_env
+        return gym.wrappers.RecordVideo(
             raw_env,
             video_folder=args_cli.video_dir,
             step_trigger=lambda step: step == 0,
             video_length=args_cli.video_length,
             disable_logger=True,
         )
-    env = SkrlVecEnvWrapper(raw_env, ml_framework="torch")
-    runner = estimator = payload = None
+
+    env, teacher_agent = build_env_and_teacher(
+        args_cli.task,
+        args_cli.adapter,
+        env_cfg,
+        agent_cfg,
+        args_cli.teacher_checkpoint,
+        args_cli.device,
+        render_mode="rgb_array" if args_cli.video else None,
+        wrap_raw=wrap_raw,
+    )
+    core = unwrap_env_with_robot(env) or getattr(env, "unwrapped", None)
+    if core is None or not hasattr(core, "robot"):
+        raise RuntimeError("Unable to find the G1 environment exposing `robot`")
+    estimator = payload = None
     history = None
     if args_cli.replay_action_log is None:
-        agent_cfg["trainer"]["close_environment_at_exit"] = False
-        agent_cfg["agent"]["experiment"]["write_interval"] = 0
-        agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
-        runner = Runner(env, agent_cfg)
-        runner.agent.load(str(Path(args_cli.teacher_checkpoint).resolve()))
-        runner.agent.enable_training_mode(False, apply_to_models=True)
+        teacher_agent.enable_training_mode(False, apply_to_models=True)
         estimator, payload = load_estimator(args_cli.estimator_checkpoint, args_cli.device)
         adapter = make_policy_adapter(args_cli.adapter, env, payload["joint_preset"])
         if payload["task"] != args_cli.task or payload["adapter"] != args_cli.adapter:
@@ -114,7 +131,13 @@ def main(env_cfg, agent_cfg):
              *[f"estimate_{name}" for name in adapter.schema.estimator_target_names]]
         )
     action_log: list[np.ndarray] = []
-    diagnostics = RolloutDiagnostics(core, log_index, max_steps=max(args_cli.steps, args_cli.video_length))
+    # RolloutDiagnostics reads the Direct envs' action-to-position mapping, which the
+    # manager-based walk env expresses through its action manager instead.
+    diagnostics = (
+        None
+        if uses_rsl_rl(args_cli.adapter)
+        else RolloutDiagnostics(core, log_index, max_steps=max(args_cli.steps, args_cli.video_length))
+    )
     step_limit = args_cli.video_length if args_cli.video else args_cli.steps
     try:
         for step in range(step_limit):
@@ -134,12 +157,13 @@ def main(env_cfg, agent_cfg):
                     sequence = history.push(frame)
                     model_input = frame if payload["model_config"]["type"].upper() == "MLP" else sequence
                     estimate = estimator.predict(model_input)
-                    action = adapter.action(runner.agent, adapter.inject_estimate(observations, estimate))
+                    action = adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
                 observations, _, terminated, truncated, _ = env.step(action)
                 done = (terminated | truncated).flatten()
                 if history is not None and done.any():
                     history.reset(done)
-            diagnostics.record(action)
+            if diagnostics is not None:
+                diagnostics.record(action)
             action_log.append(action[log_index].detach().cpu().numpy().copy())
             if csv_writer is not None:
                 estimate_values = [] if estimate is None else estimate[log_index].detach().cpu().tolist()
@@ -160,10 +184,11 @@ def main(env_cfg, agent_cfg):
                 joint_names=np.asarray(core.robot.data.joint_names),
                 policy_dt=float(core.step_dt),
             )
-        diagnostic_dir = args_cli.diagnostic_output or args_cli.video_dir
-        artifacts = diagnostics.save(diagnostic_dir, float(core.step_dt), "teacher_estimator_diagnostics")
-        if artifacts:
-            print(f"Diagnostics: {artifacts}")
+        if diagnostics is not None:
+            diagnostic_dir = args_cli.diagnostic_output or args_cli.video_dir
+            artifacts = diagnostics.save(diagnostic_dir, float(core.step_dt), "teacher_estimator_diagnostics")
+            if artifacts:
+                print(f"Diagnostics: {artifacts}")
         env.close()
 
 

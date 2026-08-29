@@ -7,7 +7,16 @@ from typing import Any
 
 import torch
 
-from ..schema import AMP_OBSERVATION_SCHEMA, PPO_OBSERVATION_SCHEMA, ObservationSchema, joint_indices
+from ..schema import (
+    AMP_OBSERVATION_SCHEMA,
+    PPO_OBSERVATION_SCHEMA,
+    PPO_WALK_OBSERVATION_SCHEMA,
+    ObservationSchema,
+    joint_indices,
+    ppo_walk_history_target_indices,
+    ppo_walk_target_scales,
+    PPO_WALK_HISTORY_LENGTH,
+)
 from ..skrl_compat import deterministic_action
 from ..task_math import inject_observation_estimate
 
@@ -82,10 +91,73 @@ class PpoPolicyAdapter(PolicyAdapter):
         return "ppo"
 
 
+class PpoWalkPolicyAdapter(PolicyAdapter):
+    """Adapter for the manager-based PPO walk teacher driven by rsl-rl.
+
+    Two things differ from the Direct-workflow adapters and both are plumbing,
+    not method:
+
+    * The teacher is an rsl-rl policy, so it is called directly instead of going
+      through SKRL's ``act`` API.
+    * The policy observation carries a five-step history per term, and the
+      observation manager stores ``base_ang_vel`` pre-scaled by 0.2. Injection
+      therefore rescales the estimate and overwrites the *entire* history block
+      of the three estimated terms. Replacing only the newest frame would leave
+      four frames of ground-truth privileged state visible to the policy, which
+      would understate the closed-loop cost of estimation error.
+    """
+
+    schema = PPO_WALK_OBSERVATION_SCHEMA
+
+    def __init__(self, env, joint_preset: str = "all"):
+        super().__init__(env, joint_preset)
+        self._history_indices = ppo_walk_history_target_indices()
+        self._scales: torch.Tensor | None = None
+        self._ring: torch.Tensor | None = None
+
+    def name(self) -> str:
+        return "ppo_walk"
+
+    def action(self, agent: Any, observations: torch.Tensor) -> torch.Tensor:
+        return agent(self.env.as_policy_input(observations))
+
+    def _scaled(self, estimate: torch.Tensor) -> torch.Tensor:
+        if self._scales is None:
+            self._scales = torch.tensor(
+                ppo_walk_target_scales(), device=estimate.device, dtype=estimate.dtype
+            )
+        return estimate * self._scales
+
+    def _push(self, estimate: torch.Tensor) -> torch.Tensor:
+        """Roll the estimate ring and return it flattened oldest-frame-first.
+
+        The ring is refilled with the current estimate for environments that just
+        reset, matching how the observation manager repopulates its own history
+        buffer after a reset.
+        """
+        scaled = self._scaled(estimate)
+        if self._ring is None or self._ring.shape[0] != scaled.shape[0]:
+            self._ring = scaled.unsqueeze(1).repeat(1, PPO_WALK_HISTORY_LENGTH, 1)
+        else:
+            self._ring = torch.roll(self._ring, -1, dims=1)
+            self._ring[:, -1] = scaled
+            just_reset = self.core_env.episode_length_buf == 0
+            if bool(just_reset.any()):
+                self._ring[just_reset] = scaled[just_reset].unsqueeze(1)
+        return self._ring.reshape(scaled.shape[0], -1)
+
+    def inject_estimate(self, observations: torch.Tensor, estimate: torch.Tensor) -> torch.Tensor:
+        if estimate.shape[-1] != self.schema.estimator_target_dim:
+            raise ValueError("Estimator output does not match the policy schema")
+        return inject_observation_estimate(observations, self._push(estimate), self._history_indices)
+
+
 def make_policy_adapter(kind: str, env, joint_preset: str = "all") -> PolicyAdapter:
     kind = kind.lower()
     if kind == "amp":
         return AmpPolicyAdapter(env, joint_preset)
     if kind == "ppo":
         return PpoPolicyAdapter(env, joint_preset)
-    raise ValueError(f"Unknown policy adapter {kind!r}; choose amp or ppo")
+    if kind == "ppo_walk":
+        return PpoWalkPolicyAdapter(env, joint_preset)
+    raise ValueError(f"Unknown policy adapter {kind!r}; choose amp, ppo, or ppo_walk")

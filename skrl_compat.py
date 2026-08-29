@@ -60,6 +60,20 @@ def prepare_runner_config(config: MutableMapping) -> MutableMapping:
     return config
 
 
+def disable_velocity_termination_for_evaluation(env_cfg) -> float | None:
+    """Disable only the optional low-forward-velocity termination.
+
+    Evaluation should still report genuine falls through the height termination,
+    while a policy that pauses or moves backwards must be allowed to continue.
+    Return the configured threshold so callers can report what was overridden.
+    """
+    if not hasattr(env_cfg, "vel_window_min_vx"):
+        return None
+    threshold = float(env_cfg.vel_window_min_vx)
+    env_cfg.vel_window_min_vx = 0.0
+    return threshold
+
+
 def force_skrl_isaaclab_reset(env) -> None:
     """Re-enable physical reset on SKRL's reset-once Isaac Lab wrapper."""
     current = env
