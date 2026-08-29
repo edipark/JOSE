@@ -590,13 +590,29 @@ def test_method_comparison_accepts_one_to_three_cases(tmp_path):
     assert all(method in result.stdout for method in ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE"))
     assert "/studies/method_comparison/paper_baseline" in result.stdout
     assert "/methods/imu_based_distillation/window_21/joints_all/seed_7" in result.stdout
+    assert "/amp_walk/" in result.stdout
+    assert "/methods/jose/window_25/joints_all/seed_7" in result.stdout
+    assert "/amp_jump/" in result.stdout
     assert "/methods/jose/window_50/joints_all/seed_7" in result.stdout
+    walk_jose = next(
+        line for line in result.stdout.splitlines()
+        if "train_state_estimator.py" in line and "Isaac-G1-AMP-Walk" in line
+    )
+    assert "--estimator LSTM" in walk_jose
+    assert "--window 25 --joint-preset all" in walk_jose
     assert "logs/jose_g1/method_comparison" not in result.stdout
     failure = subprocess.run(
         [sys.executable, str(script), "--case", "walk", "x", "--case", "dance", "x", "--case", "jump", "x", "--case", "walk", "x", "--dry-run"],
         capture_output=True, text=True,
     )
     assert failure.returncode != 0
+
+
+def test_amp_walk_default_estimator_is_lstm_w25_all():
+    training_source = (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
+    assert 'default="LSTM"' in training_source
+    assert 'default="all"' in training_source
+    assert 'args_cli.window = 25 if args_cli.task == "Isaac-G1-AMP-Walk-JOSE-Direct-v0" else 50' in training_source
 
 
 def test_rollout_diagnostics_npz_and_plot(tmp_path):

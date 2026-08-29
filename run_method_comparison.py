@@ -164,12 +164,19 @@ def _metrics(path: Path) -> dict:
     return {key: value for key, value in metrics.items() if isinstance(value, (int, float, list, dict, bool))}
 
 
-def _method_output(method: str, seed: int, run_root: Path) -> Path:
+def _jose_window(task: str) -> int:
+    # The canonical AMP Walk estimator selected by the architecture study is
+    # LSTM with a 25-frame, all-joint input. Other motion tasks retain their
+    # existing method-comparison setting until selected separately.
+    return 25 if task == TASKS["walk"] else 50
+
+
+def _method_output(method: str, task: str, seed: int, run_root: Path) -> Path:
     output = run_root / "methods" / METHOD_SLUGS[method]
     if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         output = output / "window_21" / "joints_all"
     elif method == "JOSE":
-        output = output / "window_50" / "joints_all"
+        output = output / f"window_{_jose_window(task)}" / "joints_all"
     return output / f"seed_{seed}"
 
 
@@ -181,7 +188,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         "--rollout-steps", str(args.student_rollout_steps), "--train-steps", str(args.student_train_steps),
         "--eval-steps", str(args.eval_steps),
     ]
-    output = _method_output(method, seed, run_root)
+    output = _method_output(method, task, seed, run_root)
     if method == "PrivilegedTeacher":
         command = [
             sys.executable, str(root / "evaluate_teacher.py"), "--teacher-checkpoint", teacher,
@@ -194,13 +201,14 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
         command = [sys.executable, str(root / script), *common_student, "--log-dir", str(output)]
     else:
+        jose_window = _jose_window(task)
         command = [
             sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
             "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
             "--dagger-rounds", str(args.estimator_dagger_rounds), "--estimator", "LSTM",
             "--max-dataset-size", str(args.estimator_max_dataset_size),
-            "--window", "50", "--joint-preset", "all", "--output-dir", str(output.parent),
+            "--window", str(jose_window), "--joint-preset", "all", "--output-dir", str(output.parent),
             "--run-name", output.name,
         ]
     if args.headless:
@@ -301,7 +309,7 @@ def main() -> None:
                 continue
             started = time.monotonic()
             started_at = datetime.now().isoformat()
-            log = _method_output(method, seed, study) / "process.log"
+            log = _method_output(method, task, seed, study) / "process.log"
             returncode = _run(command, log)
             row = {
                 "signature": signature, "task": task, "task_id": task, "experiment": method,
