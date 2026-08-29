@@ -185,7 +185,6 @@ def test_observation_schemas_round_trip():
     assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_dim == 43
     assert schema.AMP_OBSERVATION_SCHEMA.estimator_target_indices == tuple(range(58, 101))
     assert len(schema.AMP_PRIVILEGED_NAMES) == 43
-    assert schema.PPO_OBSERVATION_SCHEMA.policy_dim == 99
     assert schema.ObservationSchema.from_dict(schema.AMP_OBSERVATION_SCHEMA.to_dict()) == schema.AMP_OBSERVATION_SCHEMA
 
 

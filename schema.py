@@ -144,16 +144,6 @@ AMP_OBSERVATION_SCHEMA = ObservationSchema(
     estimator_target_names=AMP_PRIVILEGED_NAMES,
 )
 
-# PPO layout: estimated base state(9), command(3), q(29), qd(29), previous action(29).
-PPO_OBSERVATION_SCHEMA = ObservationSchema(
-    name="g1_ppo_walk_99",
-    policy_dim=99,
-    joint_position_start=12,
-    joint_velocity_start=41,
-    estimator_target_indices=tuple(range(9)),
-)
-
-
 def joint_indices(robot_joint_names: Sequence[str], preset: str = "all") -> tuple[int, ...]:
     """Resolve a preset by name, rejecting missing, duplicate, or ambiguous joints."""
     if preset not in JOINT_PRESETS:

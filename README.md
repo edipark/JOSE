@@ -99,16 +99,15 @@ Videos and rollout diagnostics are saved under `videos/play/` in the training ru
 | AMP walk | `Isaac-G1-AMP-Walk-JOSE-Direct-v0` | `AMP` |
 | AMP dance | `Isaac-G1-AMP-Dance-JOSE-Direct-v0` | `AMP` |
 | AMP jump | `Isaac-G1-AMP-Jump-JOSE-Direct-v0` | `AMP` |
-| PPO walk example | `Isaac-G1-PPO-Walk-JOSE-Direct-v0` | `PPO` |
 | **Velocity-tracking PPO walk** | `Isaac-G1-PPO-Walk-JOSE-v0` | `PPO` (rsl-rl) |
 | **PPO walk, estimator variant** | `Isaac-G1-PPO-Walk-Estimator-JOSE-v0` | `PPO` (rsl-rl) |
 
-The first four tasks end in `-Direct-v0`. They are Direct-workflow environments
+The first three tasks end in `-Direct-v0`. They are Direct-workflow environments
 trained with `skrl` through `jose.train`. The last two are manager-based
 environments trained with `rsl-rl` through `train_ppo_walk.py`; see
 [Velocity-tracking PPO walk](#velocity-tracking-ppo-walk) below.
 
-Use a different task ID to train dance, jump, or the Direct PPO walk:
+Use a different task ID to train dance or jump:
 
 ```bash
 # Dance
@@ -121,12 +120,6 @@ python -m jose.train \
 python -m jose.train \
   --task Isaac-G1-AMP-Jump-JOSE-Direct-v0 \
   --algorithm AMP \
-  --headless
-
-# PPO walk
-python -m jose.train \
-  --task Isaac-G1-PPO-Walk-JOSE-Direct-v0 \
-  --algorithm PPO \
   --headless
 ```
 
@@ -217,25 +210,153 @@ export JOSE_G1_MODEL_DIR=/path/to/unitree_model
 
 ### Train
 
+Use `train_ppo_walk.py`. This is the rsl-rl entry point; do **not** use
+`jose.train`, which drives the SKRL `-Direct-v0` tasks and cannot load this task's
+config.
+
 ```bash
+conda activate env_isaaclab
+cd /path/to/JOSE
+
 python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless
 ```
 
-That uses the upstream defaults: 4096 environments and 50000 iterations. Output
-goes to `logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/<timestamp>/`, containing
-checkpoints, TensorBoard events, and a `params/` directory with `env.yaml`,
-`agent.yaml`, and `deploy.yaml` (the joint ordering, gains, and observation
-scales needed for deployment).
+That single command runs the complete recipe at its defaults — 4096 environments
+for 50000 iterations — and needs no other arguments.
 
-For a quick check that everything works before committing to a full run:
+Before committing to a full run, a short smoke run confirms the whole stack
+works (this finishes in well under a minute):
 
 ```bash
 python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless \
   --num_envs 64 --max_iterations 5
 ```
 
-Useful options: `--num_envs`, `--max_iterations`, `--seed`, `--device`,
-`--resume`, `--load_run`, `--checkpoint`, `--video`, `--logger wandb`.
+#### Defaults
+
+These are the values already in `ppo_walk/agents/rsl_rl_ppo_cfg.py` and
+`ppo_walk/walk_env_cfg.py`. You do not need to pass any of them; they are listed
+so you know what a bare `train_ppo_walk.py` run is actually doing.
+
+**Runner / PPO** (`ppo_walk/agents/rsl_rl_ppo_cfg.py`)
+
+| Setting | Default | Setting | Default |
+|---|---|---|---|
+| `max_iterations` | `50000` | `learning_rate` | `1.0e-3` |
+| `num_steps_per_env` | `24` | `schedule` | `adaptive` |
+| `save_interval` | `100` | `desired_kl` | `0.01` |
+| `num_learning_epochs` | `5` | `gamma` | `0.99` |
+| `num_mini_batches` | `4` | `lam` | `0.95` |
+| `clip_param` | `0.2` | `max_grad_norm` | `1.0` |
+| `entropy_coef` | `0.01` | `value_loss_coef` | `1.0` |
+| `actor_hidden_dims` | `[512, 256, 128]` | `use_clipped_value_loss` | `True` |
+| `critic_hidden_dims` | `[512, 256, 128]` | `init_noise_std` | `1.0` |
+| `activation` | `elu` | `empirical_normalization` | `False` |
+| `obs_groups` | `{"actor": ["policy"], "critic": ["critic"]}` | `clip_actions` | `None` (no clipping) |
+| `seed` | `42` | `device` | `cuda:0` |
+| `logger` | `tensorboard` | `experiment_name` | derived from the task ID |
+
+With the defaults, one iteration collects `4096 envs x 24 steps = 98304`
+transitions and takes 5 epochs over 4 minibatches.
+
+**Environment** (`ppo_walk/walk_env_cfg.py`)
+
+| Setting | Default | Note |
+|---|---|---|
+| `scene.num_envs` | `4096` | `64` for the play config |
+| `sim.dt` | `0.005` | 200 Hz physics |
+| `decimation` | `4` | 50 Hz policy, so `step_dt = 0.02` |
+| `episode_length_s` | `20.0` | 1000 policy steps per episode |
+| action scale | `0.25` | joint position offsets from the default pose |
+| `history_length` | `5` | on both the policy and critic groups |
+| command resample | every `10.0` s | no curriculum; the full range is sampled from step 0 |
+| command range | `lin_x [0, 1.0]`, `lin_y [-0.5, 0.5]`, `ang_z [-1.0, 1.0]` | official Isaac Lab G1 flat ranges |
+| terrain | flat plane | no generator, no height scanner |
+| terminations | timeout, base height `< 0.2` m, tilt `> 0.8` rad | |
+
+To change any of them, edit the config file rather than passing flags. Note that
+the reward weights and command ranges are not free parameters: the combination in
+the file is the one that was measured to walk, and several nearby combinations
+were measured to produce a statue. See
+[Flat-terrain command tracking](#flat-terrain-command-tracking) before retuning.
+
+#### Command-line options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--task` | `Isaac-G1-PPO-Walk-JOSE-v0` | Task ID to train |
+| `--headless` | off | No GUI; use this for real runs |
+| `--num_envs` | from config (`4096`) | Override the environment count |
+| `--max_iterations` | from config (`50000`) | Override the iteration count |
+| `--seed` | from config (`42`) | Seed; `-1` picks a random one |
+| `--device` | `cuda:0` | GPU to use |
+| `--run_name` | none | Suffix appended to the run directory name |
+| `--resume` | off | Continue from a saved checkpoint |
+| `--load_run` | latest | Which run directory to resume from |
+| `--checkpoint` | latest | Which checkpoint file to resume from |
+| `--logger` | `tensorboard` | `tensorboard`, `wandb`, or `neptune` |
+| `--video` | off | Record training clips (needs `--enable_cameras`) |
+| `--distributed` | off | Multi-GPU training via `torchrun` |
+
+#### Output layout
+
+```text
+logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/<YYYY-MM-DD_HH-MM-SS>[_<run_name>]/
+├── model_0.pt, model_100.pt, ...   # checkpoints, every save_interval iterations
+├── events.out.tfevents.*           # TensorBoard scalars
+├── git/                            # repository state at launch
+└── params/
+    ├── env.yaml                    # resolved environment config
+    ├── agent.yaml                  # resolved runner config
+    ├── deploy.yaml                 # joint order, gains, observation scales for sim2sim/sim2real
+    └── walk_env_cfg.py             # copy of the config source
+```
+
+#### Watching a run
+
+```bash
+tensorboard --logdir logs/rsl_rl/isaac_g1_ppo_walk_jose_v0
+```
+
+**`Train/mean_reward` is not a health signal here.** The tracking kernels use
+`std = 0.5`, so a perfectly motionless robot already collects
+`exp(-|cmd|^2 / 0.25)` every step — 0.795 reward/s under this task's command
+ranges. A policy can raise total reward while standing perfectly still, which is
+exactly how the previous recipe failed.
+
+Watch these instead:
+
+- `Episode_Reward/feet_air_time` — **zero means the robot is not stepping at
+  all**, whatever the total reward says. Its ceiling is 0.30/s (weight 0.75 ×
+  threshold 0.4); a walking policy reaches a few percent of that within a few
+  hundred iterations and keeps climbing.
+- `Train/mean_episode_length` should climb toward 1000. If it *peaks early and
+  then decays* while reward rises, the policy is learning to fall on purpose.
+- `Metrics/base_velocity/error_vel_xy` and `error_vel_yaw` should fall.
+- `Episode_Termination/bad_orientation` should fall as the robot stops toppling.
+
+Confirm with `eval_ppo_walk.py` before concluding anything; see
+[Flat-terrain command tracking](#flat-terrain-command-tracking).
+
+#### Resuming
+
+```bash
+python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless \
+  --resume --load_run 2026-08-28_22-25-37 --checkpoint model_1000.pt
+```
+
+Omit `--load_run` / `--checkpoint` to pick up the most recent run and checkpoint.
+
+Note that `--checkpoint` means different things in the two scripts: in
+`train_ppo_walk.py` it is a file name looked up inside `--load_run`, while in
+`play_ppo_walk.py` it is a full path to the checkpoint file.
+
+#### Multi-GPU
+
+```bash
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 \
+  train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless --distributed
+```
 
 ### Play and export
 
@@ -246,6 +367,96 @@ python play_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --num_envs 32
 This loads the latest checkpoint, writes `exported/policy.pt` (TorchScript) and
 `exported/policy.onnx` next to it, and then runs the policy. Playback uses 32
 environments on easier terrain with the command range opened to its full limits.
+
+To play a specific checkpoint, and to run at wall-clock speed:
+
+```bash
+python play_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 \
+  --checkpoint logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/<run>/model_5000.pt \
+  --num_envs 4 --real-time
+```
+
+The play loop runs until you close it, so stop it with Ctrl+C. The exported files
+are written before the loop starts, so you can interrupt it as soon as they
+appear if you only wanted the export.
+
+> Recording with `--video` in headless mode has to initialize the RTX renderer,
+> which can take several minutes the first time while shaders compile. Leave
+> `--video` off unless you need the clip.
+
+### Flat-terrain command tracking
+
+The original unitree_rl_lab recipe converged to a policy that stands still and
+ignores the velocity command. The cause is `foot_clearance_reward`:
+
+```python
+reward = exp(-sum((foot_z - target)^2 * tanh(k * |v_foot_xy|)) / std)
+```
+
+`tanh(k * |v_foot_xy|)` is zero whenever a foot is not moving, so the sum inside
+`exp` is zero and the term returns `exp(0) = 1` — its **maximum** — for a robot
+standing on two feet. In run `2026-08-28_23-06-25` it saturated at `0.787` of a
+`0.81` ceiling, 69% of the net episode reward. Upstream tracks the same bug in
+[unitree_rl_lab#80](https://github.com/unitreerobotics/unitree_rl_lab/pull/80).
+
+`ppo_walk/walk_env_cfg.py` now carries the configuration that was measured to
+walk. Its module docstring derives every change; the short version is that
+removing the degenerate term was necessary but **not sufficient**. Five
+configurations were trained and measured with `eval_ppo_walk.py`, and only the
+last one produces a gait:
+
+| Configuration | `feet_air_time` @500 | Walks? |
+|---|---|---|
+| air-time reward, original command ranges | 0.0001 | no — also no at 3000 iterations |
+| + official G1 command ranges | 0.0003 | no |
+| + posture penalties at official weights | 0.0004 | no |
+| **+ drops `joint_vel` and `alive`** ← shipped | **0.0117** | **yes** |
+| + a zero-command standing reward | 0.0020 | no — it rebuilt the statue |
+
+`joint_vel_l2` (-0.001, absent from official G1) was the largest single penalty in
+every run at -0.13 to -0.17/s, and it taxes exactly what a gait needs. Dropping it
+together with the `alive` bonus is what unlocked stepping.
+
+Measured at 500 iterations, 64 environments: commanded `vx` 0.0 / 0.3 / 0.6 gives
+0.13 / 0.27 / 0.38 m/s, yaw ±0.3 gives ±0.24 rad/s, ~11 foot lifts/s, zero falls.
+The known remaining defect is that it marches in place and creeps at 0.13 m/s
+under a zero command — fix that by fine-tuning a checkpoint that already walks,
+with a weight ≤0.05 or Isaac Lab's `stand_still_joint_deviation_l1`, and re-run
+the evaluation to confirm the gait survived. The naive version of that fix
+(weight 0.5) destroyed the gait outright.
+
+#### Warm-starting the actor only
+
+Resuming a checkpoint trained under the old reward set would drag its stale value
+function into the new MDP. `--load_actor_only` loads the actor weights and leaves
+the critic and the optimizer freshly initialised:
+
+```bash
+python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless \
+  --load_actor_only logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/<run>/model_2999.pt
+```
+
+The actor now takes 495 inputs against the old 480. Because `base_lin_vel` is
+declared *first* in the observation group, every old input keeps its relative
+offset, so the old weight matrix is copied into the right-hand columns and the 15
+new columns are zeroed. The flag is mutually exclusive with `--resume`.
+
+#### Evaluating command tracking
+
+Watching the viewer cannot distinguish a walking policy from a statue that
+survives. `eval_ppo_walk.py` holds each of eight fixed commands across every
+environment and reports tracking error, survival, air time, foot-lift rate,
+double-stance fraction and zero-command drift:
+
+```bash
+python eval_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless \
+  --num_envs 64 \
+  --checkpoint logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/<run>/model_2999.pt \
+  --output eval.json
+```
+
+It also runs six sanity checks, including that `feet_air_time` never fires in
+double stance and that measured `vx` rises with commanded `vx`.
 
 ### What was adapted, and why
 
@@ -610,11 +821,11 @@ python -m jose.motions.motion_replayer --help
 
 ```text
 ├── g1_amp_env.py, g1_amp_env_cfg.py       # AMP walk, dance, and jump environments
-├── g1_ppo_env.py                          # PPO walk example
 ├── ppo_walk/                              # Velocity-tracking PPO walk task (rsl-rl)
 ├── train_ppo_walk.py, play_ppo_walk.py    # PPO walk training and playback
+├── eval_ppo_walk.py                       # Fixed-command tracking evaluation
 ├── teacher_setup.py                       # Shared SKRL / rsl-rl teacher construction
-├── agents/                                # SKRL AMP and PPO settings
+├── agents/                                # SKRL AMP settings
 ├── motions/                               # Motion data and motion tools
 ├── estimator/                             # Estimator models and training code
 ├── distillation/                          # History students and IMU input code

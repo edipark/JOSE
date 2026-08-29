@@ -1,15 +1,22 @@
 """Estimator-compatible variant of the G1 29-DOF walk environment.
 
-This is :mod:`walk_env_cfg` with exactly one change: the ``base_lin_vel``
-observation term is prepended to the *policy* group. The base walk task keeps
-base linear velocity privileged (critic-only), so there is no slot for a state
-estimator to write into; this variant gives the estimator a real injection slot
-while leaving rewards, actions, commands, events, terminations, curriculum and
-every algorithm hyperparameter untouched.
+This is :mod:`walk_env_cfg` with exactly one change: the *policy* observation
+group carries a **noiseless** ``base_lin_vel`` term. The base walk task adds
+observation noise to it, which is right for a policy that will be handed a
+learned estimate; here the term is the privileged quantity the estimator is
+trained to reproduce, so it must be clean. Rewards, actions, commands, events,
+terminations and every algorithm hyperparameter are inherited unchanged, so this
+variant automatically tracks the base task's reward set.
 
-The added term is noiseless on purpose: it is the privileged quantity the
-estimator is trained to reproduce, mirroring how the AMP and Direct-PPO teachers
-in JOSE expose their privileged base state.
+Do not reorder or resize this group. :data:`jose.schema.PPO_WALK_OBSERVATION_SCHEMA`
+hardcodes the resulting 495-D layout --
+
+    base_lin_vel(5x3) base_ang_vel(5x3) projected_gravity(5x3)
+    velocity_commands(5x3) joint_pos_rel(5x29) joint_vel_rel(5x29) last_action(5x29)
+
+-- and ``estimator/adapters.py`` injects estimates at fixed indices derived from
+it. Changing the term order or the history length silently corrupts the
+estimator's injection targets; ``test_jose.py`` guards the layout.
 """
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup

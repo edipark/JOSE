@@ -45,9 +45,9 @@ TASKS = {
     "amp_walk": ("Isaac-G1-AMP-Walk-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
-    "ppo_walk": ("Isaac-G1-PPO-Walk-JOSE-Direct-v0", "ppo", "skrl_cfg_entry_point"),
     # Manager-based walk teacher trained with rsl-rl; same estimator methodology.
-    "ppo_walk_manager": (
+    # (The SKRL Direct PPO walk task it replaced was removed.)
+    "ppo_walk": (
         "Isaac-G1-PPO-Walk-Estimator-JOSE-v0",
         "ppo_walk",
         "rsl_rl_cfg_entry_point",
@@ -80,8 +80,7 @@ TASK_IMPLEMENTATION = {
     "amp_walk": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_amp_cfg.yaml"),
     "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
     "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
-    "ppo_walk": ("__init__.py", "g1_cfg.py", "g1_ppo_env.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_ppo_cfg.yaml"),
-    "ppo_walk_manager": (
+    "ppo_walk": (
         "__init__.py",
         "ppo_walk/g1_asset.py",
         "ppo_walk/walk_env_cfg.py",
@@ -89,7 +88,6 @@ TASK_IMPLEMENTATION = {
         "ppo_walk/walk_estimator_env.py",
         "ppo_walk/agents/rsl_rl_ppo_cfg.py",
         "ppo_walk/mdp/rewards.py",
-        "ppo_walk/mdp/curriculums.py",
     ),
 }
 
@@ -192,7 +190,7 @@ def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> arg
     parser.add_argument("--task", choices=tuple(TASKS), default="amp_walk", help="Task preset (default: walk)")
     parser.add_argument("--task-id", default=None, help="Override Gym task id")
     parser.add_argument("--agent_cfg_entry_point", "--agent", dest="agent", default=None)
-    parser.add_argument("--adapter", choices=("amp", "ppo"), default=None)
+    parser.add_argument("--adapter", choices=("amp", "ppo_walk"), default=None)
     parser.add_argument("--seeds", type=int, default=3, help="Number of consecutive seeds")
     parser.add_argument("--seed-start", "--seed_start", dest="seed_start", type=int, default=42)
     parser.add_argument("--num-envs", type=int, default=256)
