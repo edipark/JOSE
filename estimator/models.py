@@ -289,4 +289,4 @@ def build_estimator(
         return MLPStateEstimator(input_dim, output_dim, hidden_size)
     if estimator_type in ("HISTORY_MLP", "HISTORY-MLP"):
         return HistoryMLPStateEstimator(input_dim, output_dim, hidden_size, window)
-    raise ValueError(f"Unknown estimator type {estimator_type!r}; choose LSTM, TCN, or MLP")
+    raise ValueError(f"Unknown estimator type {estimator_type!r}; choose LSTM, TCN, MLP, or HISTORY_MLP")

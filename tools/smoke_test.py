@@ -11,7 +11,7 @@ parser.add_argument("--steps", type=int, default=12)
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument(
     "--task",
-    choices=("amp_walk", "amp_dance", "amp_jump"),
+    choices=("amp_walk", "amp_dance", "amp_jump", "ppo_walk"),
     default="amp_walk",
     help="Run one task per process because Isaac Sim owns a singleton simulation context",
 )
@@ -31,6 +31,7 @@ TASKS = {
     "amp_walk": ("Isaac-G1-AMP-Walk-JOSE-Direct-v0", 101),
     "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", 101),
     "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", 101),
+    "ppo_walk": ("Isaac-G1-PPO-Walk-Estimator-JOSE-v0", 495),
 }
 
 

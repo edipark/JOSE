@@ -31,7 +31,11 @@ parser.add_argument("--lr", type=float, default=1.0e-4)
 parser.add_argument("--weight-decay", type=float, default=1.0e-4)
 parser.add_argument("--buffer-capacity", type=int, default=200_000)
 parser.add_argument("--eval-interval", type=int, default=20)
-parser.add_argument("--eval-steps", type=int, default=600)
+parser.add_argument(
+    "--eval-steps", type=int, default=None,
+    help="Rollout steps per evaluation call (default: the task's own max episode length, "
+    "so evaluation reaches the same natural episode boundary as the teacher)",
+)
 parser.add_argument("--save-interval", type=int, default=50)
 parser.add_argument("--gyro-noise-std", type=float, default=0.015)
 parser.add_argument("--gyro-bias-std", type=float, default=0.01)
@@ -54,6 +58,7 @@ simulation_app = app_launcher.app
 
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import time
 
@@ -98,6 +103,12 @@ def main(env_cfg, agent_cfg):
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
+    if args_cli.eval_steps is None:
+        # Match DirectRLEnv.max_episode_length so evaluation runs long enough to
+        # reach a natural termination/truncation, same as the teacher's own
+        # rollout -- otherwise a policy that never falls within a shorter fixed
+        # window silently reports that window length as its episode length.
+        args_cli.eval_steps = math.ceil(env_cfg.episode_length_s / (env_cfg.sim.dt * env_cfg.decimation))
     # `teacher_setup` hides the SKRL/rsl-rl difference, so `--adapter ppo_walk`
     # loads the manager-based walk teacher through the same call.
     env, teacher_agent = build_env_and_teacher(

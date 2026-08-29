@@ -47,12 +47,19 @@ def _numeric(values: Iterable) -> list[float]:
 
 
 def aggregate(rows: list[dict]) -> list[dict]:
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    # teacher_id distinguishes rows collected from different teacher checkpoints
+    # (e.g. a run_checkpoint_sweep.py comparison across checkpoints); it is
+    # absent from normal single-checkpoint studies, where every row shares the
+    # same default and grouping is unaffected.
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for row in rows:
-        groups[(row.get("task", "unknown"), row.get("experiment", "unknown"))].append(row)
+        groups[(row.get("task", "unknown"), row.get("experiment", "unknown"), row.get("teacher_id", "single"))].append(row)
     output = []
-    for (task, experiment), group in sorted(groups.items()):
-        summary = {"task": task, "experiment": experiment, "seeds": len(group), "successful": sum(row.get("status") == "ok" for row in group)}
+    for (task, experiment, teacher_id), group in sorted(groups.items()):
+        summary = {
+            "task": task, "experiment": experiment, "teacher_id": teacher_id,
+            "seeds": len(group), "successful": sum(row.get("status") == "ok" for row in group),
+        }
         for metric in PRIMARY_METRICS:
             values = _numeric(row.get("metrics", {}).get(metric) for row in group)
             if values:
@@ -61,13 +68,13 @@ def aggregate(rows: list[dict]) -> list[dict]:
                 summary[f"{metric}_ci95"] = 1.96 * summary[f"{metric}_std"] / math.sqrt(len(values))
         output.append(summary)
     teacher_lengths = {
-        row["task"]: row["episode_length_mean_mean"]
+        (row["task"], row["teacher_id"]): row["episode_length_mean_mean"]
         for row in output
         if row["experiment"].lower() in ("teachergt", "teacher_gt")
         and row.get("episode_length_mean_mean", 0.0) > 0.0
     }
     for row in output:
-        baseline = teacher_lengths.get(row["task"])
+        baseline = teacher_lengths.get((row["task"], row["teacher_id"]))
         if baseline is not None and "episode_length_mean_mean" in row:
             row["episode_length_ratio_percent"] = 100.0 * row["episode_length_mean_mean"] / baseline
     return output
@@ -129,12 +136,19 @@ def _latex_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
+def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """Render every plot for which qualifying data exists.
+
+    Returns the artifact filenames produced and, for each plot the data ruled
+    out, a human-readable reason -- callers report the reason instead of
+    treating the missing plot as a failure.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     artifacts = []
+    skipped: dict[str, str] = {}
     labels = [f"{row['task'].replace('Isaac-G1-', '')}\n{row['experiment']}" for row in rows]
     for metric, title in (
         ("episode_length_mean", "Mean episode length"),
@@ -143,6 +157,7 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
     ):
         selected = [(index, row) for index, row in enumerate(rows) if f"{metric}_mean" in row]
         if not selected:
+            skipped[metric] = f"no aggregated rows had a value for {metric}"
             continue
         x = range(len(selected))
         values = [row[f"{metric}_mean"] for _, row in selected]
@@ -173,6 +188,8 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
+    else:
+        skipped["pareto"] = "no aggregated rows had both rmse and inference_ms_per_sample"
     targets_by_dim: dict[int, list[tuple[str, list, list | None]]] = defaultdict(list)
     for row in raw_rows:
         values = row.get("metrics", {}).get("target_rmse")
@@ -199,6 +216,8 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
+    if not targets_by_dim:
+        skipped["target_rmse_heatmap"] = "no raw rows had metrics.target_rmse"
     dagger_rows = [row for row in raw_rows if row.get("metrics", {}).get("rounds")]
     if dagger_rows:
         figure, axis = plt.subplots(figsize=(8, 5))
@@ -217,6 +236,10 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
+    else:
+        skipped["dagger_learning_curve"] = (
+            "no raw rows had metrics.rounds (experiments with dagger_rounds=0 produce none)"
+        )
     trace_row = next(
         (row for row in raw_rows if row.get("metrics", {}).get("trace_target") and row.get("metrics", {}).get("trace_prediction")),
         None,
@@ -243,7 +266,9 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> list[str]:
             figure.savefig(path)
             artifacts.append(path.name)
         plt.close(figure)
-    return artifacts
+    else:
+        skipped["representative_trace"] = "no raw rows had both metrics.trace_target and metrics.trace_prediction"
+    return artifacts, skipped
 
 
 def generate_report(
@@ -262,13 +287,14 @@ def generate_report(
     (output / "table.md").write_text(table + "\n", encoding="utf-8")
     (output / "table.tex").write_text(_latex_table(summary) + "\n", encoding="utf-8")
     try:
-        plots = _plots(output, summary, raw_rows)
+        plots, skipped_plots = _plots(output, summary, raw_rows)
         plot_error = None
         unavailable = output / "PLOTS_UNAVAILABLE.txt"
         if unavailable.exists():
             unavailable.unlink()
     except ImportError as exc:
         plots = []
+        skipped_plots = {}
         plot_error = str(exc)
         (output / "PLOTS_UNAVAILABLE.txt").write_text(f"Install matplotlib to generate plots: {exc}\n", encoding="utf-8")
     failures = [row for row in raw_rows if row.get("status") != "ok"]
@@ -280,17 +306,26 @@ def generate_report(
     ]
     if plot_error:
         report.extend(("", f"Plot generation warning: {plot_error}"))
+    if skipped_plots:
+        report.extend(("", "## Skipped plots", ""))
+        report.extend(f"- {stem}: {reason}" for stem, reason in sorted(skipped_plots.items()))
     if failures:
         report.extend(("", "## Failed runs", "", *[f"- {row.get('task')}/{row.get('experiment')}/seed{row.get('seed')}: {row.get('error')}" for row in failures]))
     (output / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    # Tables/CSVs/summary are always producible from any non-empty raw_jsonl,
+    # so a missing one indicates a real bug and is a hard failure. Plots are
+    # conditional on the data actually containing what each plot needs (e.g. no
+    # DAgger rounds -> no dagger_learning_curve), so a missing plot is reported
+    # in report.md via `skipped_plots` above rather than raised -- only a truly
+    # unavailable matplotlib install (require_plots=True) is a hard failure.
     missing = [name for name in REQUIRED_REPORT_FILES if not (output / name).is_file()]
-    if require_plots:
-        missing.extend(name for name in REQUIRED_PLOT_FILES if not (output / name).is_file())
     if missing:
         raise RuntimeError(f"Report generation omitted required artifacts: {missing}")
+    if require_plots and plot_error:
+        raise RuntimeError(f"Plots were required but matplotlib is unavailable: {plot_error}")
     return {
         "runs": len(raw_rows), "failures": len(failures), "plots": plots,
+        "skipped_plots": skipped_plots,
         "required_files": list(REQUIRED_REPORT_FILES),
-        "required_plots": list(REQUIRED_PLOT_FILES) if require_plots else [],
         "output": str(output),
     }

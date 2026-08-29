@@ -426,7 +426,7 @@ def test_jose_pipeline_entry_points():
         "train_joint_only_distillation.py", "play_teacher_with_estimator.py", "play_dagger.py",
         "play_history_student.py",
         "run_architecture_ablation.py", "run_window_ablation.py", "run_joint_scope_ablation.py",
-        "run_method_comparison.py", "ablation_catalog.py",
+        "run_method_comparison.py", "run_checkpoint_sweep.py", "ablation_catalog.py", "ablation_common.py",
     ):
         assert (JOSE_DIR / name).is_file()
 
@@ -436,7 +436,7 @@ def test_ablation_factors_are_isolated_and_window_is_configurable(tmp_path):
     assert "default=250000" in (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
     common = [
         "--teacher_checkpoint", str(tmp_path / "teacher.pt"), "--dry-run", "--fast", "--seeds", "1",
-        "--skip-student", "--output-dir", str(tmp_path / "ablation"),
+        "--output-dir", str(tmp_path / "ablation"),
     ]
     architecture = subprocess.run(
         [sys.executable, str(JOSE_DIR / "run_architecture_ablation.py"), *common],

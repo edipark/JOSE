@@ -4,22 +4,27 @@ JOSE is an Isaac Lab package for the Unitree G1 robot (29 DOF). You can use it t
 
 ## Requirements
 
-- Linux
-- Python 3.10 or newer
-- A working Isaac Lab environment (Isaac Sim 5.1.x, Isaac Lab 2.3.x or newer)
-- `skrl>=2.0,<3.0` for the AMP and Direct-PPO tasks
-- `rsl-rl-lib` (5.0.1, already pinned by `isaaclab_rl`) for the
-  [velocity-tracking PPO walk](#velocity-tracking-ppo-walk) task
-- A CUDA GPU is recommended
+| Requirement | Version | Notes |
+|---|---|---|
+| OS | Linux | |
+| Python | 3.10+ | |
+| Isaac Sim | 5.1.x | |
+| Isaac Lab | 2.3.x+ | provides `skrl>=2.0,<3.0` and `rsl-rl-lib` — nothing extra to install for those |
+| GPU | CUDA GPU | recommended |
 
-Both RL libraries ship with a standard Isaac Lab install, so there is nothing to
-install beyond JOSE itself.
+### 1. Set up Isaac Lab
 
-Activate the Python environment that contains Isaac Lab. Then install JOSE in the same environment.
+Skip this if you already have an Isaac Lab environment — jump to step 2. Otherwise, follow the
+[official Isaac Lab installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/quickstart.html)
+to create a Python environment (conda or venv) with Isaac Sim and Isaac Lab installed in it. That
+install already includes `skrl` and `rsl-rl-lib`, so there is nothing extra to add for those.
 
-Replace `/path/to/JOSE` with the path to this repository.
+### 2. Install JOSE
+
+Activate that environment, then install JOSE into it in editable mode. Replace `/path/to/JOSE` with the path to this repository.
 
 ```bash
+conda activate <your-isaac-lab-env>
 cd /path/to/JOSE
 python -m pip install -e .
 ```
@@ -29,8 +34,6 @@ Check the installation:
 ```bash
 python -c "import jose; print('JOSE tasks registered')"
 ```
-
-The `-e` option installs the package in editable mode. Code changes are available without reinstalling the package.
 
 ## Quick start
 
@@ -167,7 +170,7 @@ Nothing extra to install. Activate the environment that has Isaac Lab and
 install JOSE in it, exactly as in [Requirements](#requirements):
 
 ```bash
-conda activate env_isaaclab      # or whichever env has Isaac Lab
+conda activate <your-isaac-lab-env>
 cd /path/to/JOSE
 python -m pip install -e .
 ```
@@ -215,7 +218,7 @@ Use `train_ppo_walk.py`. This is the rsl-rl entry point; do **not** use
 config.
 
 ```bash
-conda activate env_isaaclab
+conda activate <your-isaac-lab-env>
 cd /path/to/JOSE
 
 python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless
@@ -386,44 +389,13 @@ appear if you only wanted the export.
 
 ### Flat-terrain command tracking
 
-The original unitree_rl_lab recipe converged to a policy that stands still and
-ignores the velocity command. The cause is `foot_clearance_reward`:
-
-```python
-reward = exp(-sum((foot_z - target)^2 * tanh(k * |v_foot_xy|)) / std)
-```
-
-`tanh(k * |v_foot_xy|)` is zero whenever a foot is not moving, so the sum inside
-`exp` is zero and the term returns `exp(0) = 1` — its **maximum** — for a robot
-standing on two feet. In run `2026-08-28_23-06-25` it saturated at `0.787` of a
-`0.81` ceiling, 69% of the net episode reward. Upstream tracks the same bug in
-[unitree_rl_lab#80](https://github.com/unitreerobotics/unitree_rl_lab/pull/80).
-
-`ppo_walk/walk_env_cfg.py` now carries the configuration that was measured to
-walk. Its module docstring derives every change; the short version is that
-removing the degenerate term was necessary but **not sufficient**. Five
-configurations were trained and measured with `eval_ppo_walk.py`, and only the
-last one produces a gait:
-
-| Configuration | `feet_air_time` @500 | Walks? |
-|---|---|---|
-| air-time reward, original command ranges | 0.0001 | no — also no at 3000 iterations |
-| + official G1 command ranges | 0.0003 | no |
-| + posture penalties at official weights | 0.0004 | no |
-| **+ drops `joint_vel` and `alive`** ← shipped | **0.0117** | **yes** |
-| + a zero-command standing reward | 0.0020 | no — it rebuilt the statue |
-
-`joint_vel_l2` (-0.001, absent from official G1) was the largest single penalty in
-every run at -0.13 to -0.17/s, and it taxes exactly what a gait needs. Dropping it
-together with the `alive` bonus is what unlocked stepping.
-
-Measured at 500 iterations, 64 environments: commanded `vx` 0.0 / 0.3 / 0.6 gives
-0.13 / 0.27 / 0.38 m/s, yaw ±0.3 gives ±0.24 rad/s, ~11 foot lifts/s, zero falls.
-The known remaining defect is that it marches in place and creeps at 0.13 m/s
-under a zero command — fix that by fine-tuning a checkpoint that already walks,
-with a weight ≤0.05 or Isaac Lab's `stand_still_joint_deviation_l1`, and re-run
-the evaluation to confirm the gait survived. The naive version of that fix
-(weight 0.5) destroyed the gait outright.
+`ppo_walk/walk_env_cfg.py` no longer matches the upstream unitree_rl_lab reward
+set: the stock `foot_clearance_reward` term rewards standing still at its
+maximum, so the original recipe converges to a policy that ignores the
+velocity command. The current reward set is the one measured to actually walk.
+See [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md#flat-terrain-command-tracking)
+for the bug, the five configurations that were measured, and the known
+remaining defects.
 
 #### Warm-starting the actor only
 
@@ -543,7 +515,7 @@ Two things to know about this variant:
 
 The same `--adapter ppo_walk` flag works for `evaluate_teacher.py` and
 `play_teacher_with_estimator.py`, and `ablation_runner.py` exposes the task as
-`--task ppo_walk_manager`.
+`--task ppo_walk`.
 
 For a short test run, use less data and fewer training rounds:
 
@@ -564,6 +536,43 @@ Available model and input options:
 - `--joint-preset`: `all`, `legs`, or `upper`
 - `--window`: any positive history length
 
+### Evaluate the teacher baseline
+
+`evaluate_teacher.py` runs the teacher on ground-truth privileged observations
+(no estimator involved) and reports the deterministic baseline that every
+estimator ablation compares against. It is the collection step every ablation
+script drives internally, so you rarely need to run it by hand outside of a
+sanity check.
+
+```bash
+# AMP teacher
+python -m jose.evaluate_teacher \
+  --teacher-checkpoint "$TEACHER" \
+  --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
+  --agent skrl_amp_cfg_entry_point \
+  --adapter amp \
+  --num-envs 256 \
+  --collect-steps 2000 \
+  --headless
+
+# ppo_walk teacher
+python -m jose.evaluate_teacher \
+  --teacher-checkpoint "$TEACHER" \
+  --task Isaac-G1-PPO-Walk-Estimator-JOSE-v0 \
+  --agent rsl_rl_cfg_entry_point \
+  --adapter ppo_walk \
+  --num-envs 256 \
+  --collect-steps 2000 \
+  --headless
+```
+
+Do not confuse this with `eval_ppo_walk.py`: that script holds a fixed
+velocity command and reports tracking error/gait statistics on the *plain*
+`Isaac-G1-PPO-Walk-JOSE-v0` task (see
+[Evaluating command tracking](#evaluating-command-tracking)) and never touches
+an estimator. `evaluate_teacher.py` is the estimator-pipeline baseline;
+`eval_ppo_walk.py` is a standalone policy-quality check.
+
 ### Play the teacher with an estimator
 
 ```bash
@@ -580,6 +589,19 @@ python -m jose.play_teacher_with_estimator \
 ```
 
 Videos are saved in `logs/jose_g1/videos/teacher_estimator/` by default. The `--csv-output` option saves actions and state estimates for each step.
+
+The `ppo_walk` variant works the same way, against the estimator task and its own checkpoint:
+
+```bash
+python -m jose.play_teacher_with_estimator \
+  --teacher-checkpoint "$TEACHER" \
+  --estimator-checkpoint "$ESTIMATOR" \
+  --task Isaac-G1-PPO-Walk-Estimator-JOSE-v0 \
+  --steps 1000 \
+  --csv-output logs/rollout.csv \
+  --video \
+  --headless
+```
 
 ## DAgger policies and history students
 
@@ -650,7 +672,7 @@ python -m jose.play_history_student \
 
 ## Ablation studies
 
-All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test.
+All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test. `--task` accepts `amp_walk`, `amp_dance`, `amp_jump`, or `ppo_walk` for `run_architecture_ablation.py`/`run_window_ablation.py`/`run_joint_scope_ablation.py` (default `amp_walk`); `run_method_comparison.py` only covers the three AMP tasks.
 
 ### Compare estimator architectures
 
@@ -729,6 +751,83 @@ tables, and PNG and PDF plots. For estimator ablations, check
 `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the
 final `manifest.json`.
 
+### Catalog layout
+
+Each study run directory (`studies/<study>/<date>/`) contains:
+
+- `manifest.json` — study identity (teacher, task, config) and per-job status; `status` becomes `"complete"` once every job has a result.
+- `intermediate_results.json` — the same information plus every currently-available result row and its aggregated `summary`; safe to read while the study is still running.
+- `results.jsonl` — one JSON object per completed job, written once the study finishes; this is what `generate_report.py`/`reporting.aggregate()` consume.
+- `report/` — `summary.json`, `summary.csv`, `results_tidy.csv`, `table.md`, `table.tex`, `report.md`, and (if matplotlib is installed) PNG/PDF plots.
+
+Below the study directories, `catalog/` holds the content-addressed jobs and
+datasets themselves (keyed by a digest of the job's full configuration), which
+is what lets two different studies reuse an identical estimator run instead of
+retraining it.
+
+### Regenerate a report from existing results
+
+If you edit `results.jsonl` by hand, or change `reporting.py` and want updated
+tables/plots without retraining anything, regenerate the report bundle directly:
+
+```bash
+python -m jose.generate_report \
+  logs/jose_g1/ablation/<teacher>__<checkpoint>/amp_walk/studies/architecture/<date>/results.jsonl \
+  logs/jose_g1/ablation/<teacher>__<checkpoint>/amp_walk/studies/architecture/<date>/report \
+  --require-plots
+```
+
+`--require-plots` fails the command if matplotlib is not importable; it does
+not require every individual plot to have qualifying data — a plot skipped for
+that reason is reported in `report.md` instead of raising an error.
+
+### Sweeping across checkpoints
+
+`run_architecture_ablation.py`, `run_window_ablation.py`,
+`run_joint_scope_ablation.py`, and `run_method_comparison.py` each take one
+teacher checkpoint per invocation. `run_checkpoint_sweep.py` repeats one of
+them across every checkpoint in a training run (e.g. `agent_10000.pt` ..
+`agent_100000.pt`, plus `best_agent.pt`) and merges the resulting
+`results.jsonl` files into one comparison report, so you can see how an
+ablation's outcome changes over the course of training rather than only at the
+final checkpoint.
+
+```bash
+python -m jose.run_checkpoint_sweep \
+  --ablation-script architecture \
+  --checkpoint-dir logs/skrl/g1_jose_amp_walk/<run>/checkpoints \
+  --glob "agent_*.pt" \
+  --include-best \
+  --sweep-output-dir logs/jose_g1/ablation/sweeps/amp_walk_architecture \
+  -- --task amp_walk --seeds 3 --fast --headless
+```
+
+Everything after the bare `--` is forwarded unchanged to each per-checkpoint
+invocation, exactly like the flags shown for `run_architecture_ablation.py`
+above. `--ablation-script` selects the target (`architecture`, `window`,
+`joint_scope`, or `method_comparison`); `method_comparison` additionally
+requires `--case-task {walk,dance,jump}` in place of passthrough `--task`,
+since that script's own `--case` flag bundles a task with its checkpoint:
+
+```bash
+python -m jose.run_checkpoint_sweep \
+  --ablation-script method_comparison \
+  --checkpoint-dir logs/skrl/g1_jose_amp_walk/<run>/checkpoints \
+  --case-task walk \
+  -- --seeds 42 43 44 --fast --headless
+```
+
+Use `--dry-run` first to check the resolved checkpoint list and the exact
+command each one will run. Each checkpoint still lands in the normal
+content-addressed catalog under `--output-dir`, so a failed or interrupted
+sweep can just be re-run — completed checkpoints are reused, not repeated;
+pass `--continue-on-error` to keep sweeping past a checkpoint whose run fails
+instead of aborting. The merged output goes to `--sweep-output-dir`
+(default `<output-dir>/sweeps/<script>_<date>/`): `combined_results.jsonl`,
+`sweep_manifest.json` (per-checkpoint status), and a `report/` bundle exactly
+like a single study's, with an added `teacher_id` column identifying which
+checkpoint each row came from.
+
 ## Motion tools
 
 JOSE includes these motion files:
@@ -779,6 +878,47 @@ python -m jose.motions.data_convert \
   --output-fps 60
 ```
 
+### Visualize a motion file
+
+Plots joint trajectories and base orientation from an NPZ motion file on a desktop (no Isaac Sim needed).
+
+```bash
+python -m jose.motions.visualize_motion --file motions/G1_walk.npz
+```
+
+### Copy pelvis data between motion files
+
+Copies pelvis position/velocity/rotation trajectories from one NPZ file into another (e.g. to substitute a corrected pelvis trace into an otherwise-good motion capture). Add `--output` to write a new file instead of overwriting `--target`; `--dry-run` reports what would change without writing anything.
+
+```bash
+python -m jose.motions.update_pelvis_data \
+  --source motions/corrected_pelvis.npz \
+  --target motions/G1_walk.npz \
+  --output motions/G1_walk_fixed.npz
+```
+
+## Diagnostics and parity checks
+
+These compare JOSE's implementation against reference code or hardware logs; they are not needed for day-to-day training.
+
+```bash
+# Diff AMP hyperparameters/config against a humanoid_amp checkout
+python -m jose.tools.check_humanoid_amp_parity --reference /path/to/humanoid_amp
+
+# Diff AMP config against a SOLO reference checkout
+python -m jose.tools.check_solo_amp_parity --reference /path/to/SOLO
+
+# Inspect a G1 IMU log (or a synthetic one) for sanity
+python -m jose.tools.analyze_g1_imu_log --input logs/imu_capture.json
+python -m jose.tools.analyze_g1_imu_log --synthetic --output logs/imu_synthetic.json
+
+# Compare a recorded rollout against a reference motion
+python -m jose.tools.reference_tracking \
+  --motion motions/G1_walk.npz \
+  --tracked-motion logs/recorded_walk.npz \
+  --output reference_tracking.json
+```
+
 ## Tests
 
 Run a short simulator test for one task:
@@ -823,8 +963,11 @@ python -m jose.motions.motion_replayer --help
 ├── g1_amp_env.py, g1_amp_env_cfg.py       # AMP walk, dance, and jump environments
 ├── ppo_walk/                              # Velocity-tracking PPO walk task (rsl-rl)
 ├── train_ppo_walk.py, play_ppo_walk.py    # PPO walk training and playback
-├── eval_ppo_walk.py                       # Fixed-command tracking evaluation
+├── eval_ppo_walk.py                       # Fixed-command tracking evaluation (no estimator)
 ├── teacher_setup.py                       # Shared SKRL / rsl-rl teacher construction
+├── schema.py                              # Observation-layout schemas (AMP + ppo_walk)
+├── skrl_compat.py                         # SKRL runner-config compatibility shims
+├── task_math.py                           # Shared reward/observation math helpers
 ├── agents/                                # SKRL AMP settings
 ├── motions/                               # Motion data and motion tools
 ├── estimator/                             # Estimator models and training code
@@ -832,9 +975,18 @@ python -m jose.motions.motion_replayer --help
 ├── tools/                                 # Smoke tests and diagnostics
 ├── train.py, play.py                      # Teacher training and playback
 ├── train_state_estimator.py               # State-estimator training
+├── evaluate_teacher.py                    # Deterministic teacher-only baseline eval
 ├── train_dagger.py                        # 58D DAgger student training
 ├── train_*_distillation.py                # Joint-only and IMU student training
-└── run_*_ablation.py                      # Ablations and method comparison
+├── ablation_catalog.py                    # Content-addressed teacher/job catalog primitives
+├── ablation_common.py                     # Shared subprocess/fingerprint helpers
+├── ablation_runner.py                     # Shared ablation execution engine
+├── reporting.py                           # Aggregation, tables, and plots for ablation studies
+├── generate_report.py                     # Regenerate a report from an existing results.jsonl
+├── run_architecture_ablation.py, run_window_ablation.py,
+│   run_joint_scope_ablation.py            # Estimator architecture/window/joint-scope studies
+├── run_method_comparison.py               # Four-way Teacher/IMU/Joint-only/JOSE comparison
+└── run_checkpoint_sweep.py                # Repeat any of the above across many checkpoints
 ```
 
 JOSE runs policy control at 50 Hz and uses all 29 G1 joints. The default estimator input contains 29 joint positions and 29 simulator joint velocities. Direct history students do not use explicit base linear velocity or raw accelerometer data.

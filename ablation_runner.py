@@ -10,103 +10,48 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from datetime import datetime
-import fcntl
 import hashlib
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
 try:
     from .ablation_catalog import (
         CATALOG_FORMAT_VERSION,
+        TASK_IMPLEMENTATION,
+        TASKS,
+        TEACHER_IMPLEMENTATION,
+        TRAINING_IMPLEMENTATION,
         AblationExperiment,
         TeacherCatalog,
         canonical_digest,
         normalize_experiments,
         write_json,
     )
+    from .ablation_common import acquire_run_lock, content_identity, file_fingerprint, run_live_subprocess
     from .reporting import aggregate, generate_report
 except ImportError:
     from ablation_catalog import (
         CATALOG_FORMAT_VERSION,
+        TASK_IMPLEMENTATION,
+        TASKS,
+        TEACHER_IMPLEMENTATION,
+        TRAINING_IMPLEMENTATION,
         AblationExperiment,
         TeacherCatalog,
         canonical_digest,
         normalize_experiments,
         write_json,
     )
+    from ablation_common import acquire_run_lock, content_identity, file_fingerprint, run_live_subprocess
     from reporting import aggregate, generate_report
 
 
-TASKS = {
-    "amp_walk": ("Isaac-G1-AMP-Walk-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
-    "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
-    "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
-    # Manager-based walk teacher trained with rsl-rl; same estimator methodology.
-    # (The SKRL Direct PPO walk task it replaced was removed.)
-    "ppo_walk": (
-        "Isaac-G1-PPO-Walk-Estimator-JOSE-v0",
-        "ppo_walk",
-        "rsl_rl_cfg_entry_point",
-    ),
-}
-
-TRAINING_IMPLEMENTATION = (
-    "train_state_estimator.py",
-    "estimator/pipeline.py",
-    "estimator/adapters.py",
-    "estimator/models.py",
-    "schema.py",
-    "skrl_compat.py",
-    "teacher_setup.py",
-    "g1_amp_env.py",
-    "g1_amp_env_cfg.py",
-    "task_math.py",
-)
-TEACHER_IMPLEMENTATION = (
-    "evaluate_teacher.py",
-    "estimator/adapters.py",
-    "schema.py",
-    "skrl_compat.py",
-    "teacher_setup.py",
-    "g1_amp_env.py",
-    "g1_amp_env_cfg.py",
-    "task_math.py",
-)
-TASK_IMPLEMENTATION = {
-    "amp_walk": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_amp_cfg.yaml"),
-    "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
-    "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
-    "ppo_walk": (
-        "__init__.py",
-        "ppo_walk/g1_asset.py",
-        "ppo_walk/walk_env_cfg.py",
-        "ppo_walk/walk_estimator_env_cfg.py",
-        "ppo_walk/walk_estimator_env.py",
-        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
-        "ppo_walk/mdp/rewards.py",
-    ),
-}
-
-
-def _file_fingerprint(path: str | Path) -> dict:
-    path = Path(path).resolve()
-    if not path.is_file():
-        return {"path": str(path), "exists": False}
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {"path": str(path), "size": path.stat().st_size, "sha256": digest.hexdigest()}
-
-
-def _content_identity(fingerprint: dict) -> dict:
-    if fingerprint.get("sha256"):
-        return {"size": fingerprint.get("size"), "sha256": fingerprint["sha256"]}
-    return {"exists": False, "path": fingerprint.get("path")}
+# A dataset cache keyed by a too-short history window is useless to longer-
+# window experiments, so every cache is collected for at least this many
+# frames regardless of what the experiment itself asks for.
+MIN_DATASET_CACHE_WINDOW = 50
 
 
 def _implementation_fingerprint(paths: tuple[str, ...]) -> str:
@@ -117,23 +62,6 @@ def _implementation_fingerprint(paths: tuple[str, ...]) -> str:
         digest.update(relative.encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
-
-
-def _acquire_run_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.seek(0)
-        owner = handle.read().strip() or "unknown process"
-        handle.close()
-        raise RuntimeError(f"Another ablation is already using this teacher/task catalog ({owner})") from None
-    handle.seek(0)
-    handle.truncate()
-    handle.write(f"pid={os.getpid()} started={datetime.now().isoformat()}\n")
-    handle.flush()
-    return handle
 
 
 def _extract_metrics(training_json: Path) -> dict:
@@ -168,19 +96,6 @@ def _extract_run_config(training_json: Path) -> dict:
     return {}
 
 
-def _run_live(command: list[str], log_path: Path) -> int:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8", buffering=1) as stream:
-        process = subprocess.Popen(
-            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            print("  | " + line, end="", flush=True)
-            stream.write(line)
-        return process.wait()
-
-
 def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"JOSE G1 {study_name} ablation")
     parser.add_argument(
@@ -198,12 +113,12 @@ def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> arg
     parser.add_argument("--epochs", type=int, default=50, help="Initial estimator epochs")
     parser.add_argument("--dagger-epochs", type=int, default=10, help="Epochs per estimator DAgger round")
     parser.add_argument("--max-dataset-size", type=int, default=250000)
+    parser.add_argument("--noise-levels", type=float, nargs="+", default=[0.0, 0.01, 0.02])
     parser.add_argument("--eval-episodes", type=int, default=200)
     parser.add_argument(
         "--experiments", nargs="+", choices=tuple(item.slug for item in experiments), default=None,
         help="Run only selected canonical experiments (teacher_gt is always included)",
     )
-    parser.add_argument("--skip-student", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", default="logs/jose_g1/ablation", help="Teacher catalog root")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -212,10 +127,6 @@ def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> arg
     headless.add_argument("--no-headless", dest="headless", action="store_false")
     parser.set_defaults(headless=True)
     parser.add_argument("--rerun", action="store_true", help="Run jobs even when the catalog is complete")
-    parser.add_argument(
-        "--import-legacy", action=argparse.BooleanOptionalAction, default=True,
-        help="Register compatible successful results from the former study/session layout",
-    )
     return parser
 
 
@@ -233,7 +144,7 @@ def _job_spec(
 ) -> dict:
     common = {
         "catalog_format_version": CATALOG_FORMAT_VERSION,
-        "teacher": _content_identity(teacher),
+        "teacher": content_identity(teacher),
         "task": task,
         "task_id": task_id,
         "adapter": adapter,
@@ -255,90 +166,8 @@ def _job_spec(
         "dagger_max_samples_per_round": args.max_dataset_size,
         "dataset_aggregation": "uniform_random_subsample_after_each_round",
         "eval_episodes": args.eval_episodes,
-        "dataset_cache_window": max(50, experiment.window),
+        "dataset_cache_window": max(MIN_DATASET_CACHE_WINDOW, experiment.window),
     }
-
-
-def _legacy_config_matches(config: dict, spec: dict) -> bool:
-    experiment = spec.get("experiment")
-    if not experiment:
-        return True
-    expected = {
-        "task": spec["task_id"],
-        "adapter": spec["adapter"],
-        "estimator": experiment["estimator"],
-        "window": experiment["window"],
-        "joint_preset": experiment["joint_preset"],
-        "collect_steps": spec["collect_steps"],
-        "epochs": spec["epochs"],
-        "dagger_epochs": spec["dagger_epochs"],
-        "dagger_rounds": experiment["dagger_rounds"],
-        "max_dataset_size": spec["max_dataset_size"],
-        "eval_episodes": spec["eval_episodes"],
-        "num_envs": spec["num_envs"],
-        "seed": spec["seed"],
-        "dataset_cache_window": spec["dataset_cache_window"],
-    }
-    return all(config.get(key) == value for key, value in expected.items())
-
-
-def _import_legacy_result(
-    output_root: Path,
-    entry: Path,
-    spec: dict,
-    experiment_name: str,
-    teacher_fingerprint: dict,
-) -> dict | None:
-    """Register, without moving it, an exact successful legacy artifact."""
-    for raw_path in sorted(output_root.glob("*/sessions/*/raw_results.jsonl"), reverse=True):
-        try:
-            lines = raw_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in reversed(lines):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if record.get("status") != "ok" or record.get("seed") != spec["seed"]:
-                continue
-            if record.get("task_id") != spec["task_id"]:
-                continue
-            old_sha = record.get("teacher_fingerprint", {}).get("sha256")
-            if old_sha != teacher_fingerprint.get("sha256"):
-                continue
-            artifact = Path(record.get("artifact") or "")
-            if not artifact.is_file():
-                continue
-            if spec["kind"] == "teacher_evaluation":
-                if record.get("experiment") != "TeacherGT":
-                    continue
-                expected_samples = spec["collect_steps"] * spec["num_envs"]
-                if record.get("metrics", {}).get("samples") != expected_samples:
-                    continue
-            else:
-                config_path = artifact.parent / "config.json"
-                checkpoint_path = artifact.parent / "best_estimator.pt"
-                if not config_path.is_file() or not checkpoint_path.is_file():
-                    continue
-                try:
-                    config = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not _legacy_config_matches(config, spec):
-                    continue
-            imported = {
-                **record,
-                "experiment": experiment_name,
-                "catalog_action": "imported_legacy",
-                "catalog_spec": spec,
-                "catalog_spec_digest": canonical_digest(spec),
-                "source_record": str(raw_path),
-            }
-            legacy_id = "legacy_" + canonical_digest({"artifact": str(artifact)}, 12)
-            TeacherCatalog.write_attempt(entry, legacy_id, imported, make_current=True)
-            return imported
-    return None
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -467,14 +296,14 @@ def main(
         args.max_dataset_size = min(args.max_dataset_size, 20000)
         args.eval_episodes = min(args.eval_episodes, 20)
 
-    teacher_fingerprint = _file_fingerprint(teacher_path)
+    teacher_fingerprint = file_fingerprint(teacher_path)
     output_root = Path(args.output_dir).resolve()
     catalog = TeacherCatalog.open(
         output_root, teacher_path, teacher_fingerprint, create=not args.dry_run
     )
     run_id = catalog.next_run_id(args.task, study_name)
     study_output = catalog.study_path(args.task, study_name, run_id)
-    run_lock = None if args.dry_run else _acquire_run_lock(catalog.task_root(args.task) / ".active.lock")
+    run_lock = None if args.dry_run else acquire_run_lock(catalog.task_root(args.task) / ".active.lock")
     if not args.dry_run:
         study_output.mkdir(parents=True, exist_ok=False)
 
@@ -482,9 +311,12 @@ def main(
         tuple(item for item in experiments if item.slug in args.experiments)
         if args.experiments is not None else experiments
     )
-    matrix: list[tuple[int, str, AblationExperiment | None]] = []
+    # teacher_gt is a deterministic evaluation of the frozen privileged teacher
+    # (no reset randomization, deterministic policy head), so it is run once
+    # rather than once per seed -- re-running it per seed produced bit-identical
+    # rows that reporting.aggregate() then treated as independent samples.
+    matrix: list[tuple[int, str, AblationExperiment | None]] = [(seeds[0], "teacher_gt", None)]
     for seed in seeds:
-        matrix.append((seed, "teacher_gt", None))
         matrix.extend((seed, experiment.slug, experiment) for experiment in selected)
 
     task_implementation = TASK_IMPLEMENTATION[args.task]
@@ -592,12 +424,6 @@ def main(
             experiment = job["experiment"]
             entry = job["entry"]
             current = TeacherCatalog.read_complete(entry, require_checkpoint=experiment is not None)
-            if current is None and args.import_legacy and not args.dry_run:
-                current = _import_legacy_result(
-                    output_root, entry, job["spec"], name, teacher_fingerprint
-                )
-                if current is not None:
-                    actions[(seed, name)] = "IMPORT_LEGACY"
             if current is not None and not args.rerun:
                 action = actions.get((seed, name), "REUSE_RESULT")
                 actions[(seed, name)] = action
@@ -635,7 +461,7 @@ def main(
                 cache_window = job["spec"]["dataset_cache_window"]
                 cache_spec = {
                     "catalog_format_version": CATALOG_FORMAT_VERSION,
-                    "teacher": _content_identity(teacher_fingerprint),
+                    "teacher": content_identity(teacher_fingerprint),
                     "implementation": training_implementation,
                     "task_id": task_id,
                     "adapter": adapter,
@@ -646,7 +472,7 @@ def main(
                     "joint_preset": "all",
                     "collect_steps": args.collect_steps,
                     "max_dataset_size": args.max_dataset_size,
-                    "noise_levels": [0.0, 0.01, 0.02],
+                    "noise_levels": args.noise_levels,
                 }
                 cache_digest = canonical_digest(cache_spec, 12)
                 cache = catalog.dataset_path(args.task, seed, cache_window, "all", cache_digest)
@@ -661,6 +487,7 @@ def main(
                     "--dagger_epochs", str(args.dagger_epochs),
                     "--collect_steps", str(args.collect_steps), "--epochs", str(args.epochs),
                     "--max_dataset_size", str(args.max_dataset_size),
+                    "--noise_levels", *[str(level) for level in args.noise_levels],
                     "--eval_episodes", str(args.eval_episodes),
                     "--num_envs", str(args.num_envs), "--seed", str(seed),
                     "--dataset-cache", str(cache), "--run-name", "artifact",
@@ -682,7 +509,7 @@ def main(
             started = time.monotonic()
             started_at = datetime.now().isoformat()
             process_log = attempt / "process.log"
-            returncode = _run_live(command, process_log)
+            returncode = run_live_subprocess(command, process_log)
             record = {
                 "task": args.task,
                 "task_id": task_id,

@@ -4,35 +4,40 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
-import fcntl
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
 try:
-    from .ablation_catalog import TeacherCatalog, write_json
+    from .ablation_catalog import TASKS as CATALOG_TASK_REGISTRY, TeacherCatalog, write_json
+    from .ablation_common import (
+        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint, run_live_subprocess,
+    )
     from .reporting import generate_report
 except ImportError:
-    from ablation_catalog import TeacherCatalog, write_json
+    from ablation_catalog import TASKS as CATALOG_TASK_REGISTRY, TeacherCatalog, write_json
+    from ablation_common import (
+        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint, run_live_subprocess,
+    )
     from reporting import generate_report
 
 
+# This comparison only ever ran the AMP tasks; ppo_walk is deliberately not
+# included here (see README's method-comparison section for why).
 TASKS = {
-    "walk": "Isaac-G1-AMP-Walk-JOSE-Direct-v0",
-    "dance": "Isaac-G1-AMP-Dance-JOSE-Direct-v0",
-    "jump": "Isaac-G1-AMP-Jump-JOSE-Direct-v0",
+    "walk": CATALOG_TASK_REGISTRY["amp_walk"][0],
+    "dance": CATALOG_TASK_REGISTRY["amp_dance"][0],
+    "jump": CATALOG_TASK_REGISTRY["amp_jump"][0],
 }
 METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE")
 FORMAT_VERSION = 3
+# Gym task id -> the ablation_catalog.TASKS key it corresponds to (used to
+# place this comparison's studies in the same per-task catalog layout).
 CATALOG_TASKS = {
-    "Isaac-G1-AMP-Walk-JOSE-Direct-v0": "amp_walk",
-    "Isaac-G1-AMP-Dance-JOSE-Direct-v0": "amp_dance",
-    "Isaac-G1-AMP-Jump-JOSE-Direct-v0": "amp_jump",
+    task_id: key for key, (task_id, _, _) in CATALOG_TASK_REGISTRY.items() if task_id in TASKS.values()
 }
 METHOD_SLUGS = {
     "PrivilegedTeacher": "privileged_teacher",
@@ -74,7 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--student-iterations", type=int, default=300)
     parser.add_argument("--student-rollout-steps", type=int, default=250)
     parser.add_argument("--student-train-steps", type=int, default=100)
-    parser.add_argument("--eval-steps", type=int, default=600)
+    parser.add_argument(
+        "--eval-steps", type=int, default=None,
+        help="Rollout steps per student evaluation call (default: the task's own max episode "
+        "length, matching PrivilegedTeacher's evaluation window; --fast overrides to 50)",
+    )
     parser.add_argument("--output-dir", default="logs/jose_g1/ablation", help="Teacher catalog root")
     parser.add_argument(
         "--run-name", default=None,
@@ -88,47 +97,23 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _fingerprint(path: str, dry_run: bool) -> dict:
-    target = Path(path)
-    if not target.is_file():
-        if dry_run:
-            return {"path": path, "exists": False}
+    fingerprint = file_fingerprint(path)
+    if not dry_run and fingerprint.get("exists") is False:
         raise FileNotFoundError(f"Teacher checkpoint not found: {path}")
-    digest = hashlib.sha256()
-    with target.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {"path": path, "size": target.stat().st_size, "sha256": digest.hexdigest()}
+    return fingerprint
 
 
-def _content_identity(fingerprint: dict) -> dict:
-    """Return the checkpoint identity without its location on disk."""
-    return {
-        key: fingerprint[key]
-        for key in ("size", "sha256", "exists")
-        if key in fingerprint
-    }
+def validate_run_name(value: str) -> str:
+    """Slugify an explicit --run-name, rejecting one with no usable characters.
 
-
-def _slug(value: str) -> str:
+    Deliberately not ``ablation_catalog._slug`` (that one falls back to the
+    literal ``"checkpoint"`` for a checkpoint-derived display id, which is the
+    wrong behavior for a run name the user typed themselves).
+    """
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
     if not value:
         raise ValueError("--run-name must contain at least one letter or number")
     return value
-
-
-def _lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        raise RuntimeError(f"Comparison output is locked by another process: {path}") from None
-    handle.seek(0)
-    handle.truncate()
-    handle.write(f"pid={os.getpid()} started={datetime.now().isoformat()}\n")
-    handle.flush()
-    return handle
 
 
 def _read_success(path: Path, signature: str) -> set[tuple[str, int, str]]:
@@ -145,17 +130,6 @@ def _read_success(path: Path, signature: str) -> set[tuple[str, int, str]]:
     return completed
 
 
-def _run(command: list[str], log: Path) -> int:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("w", encoding="utf-8", buffering=1) as stream:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        assert process.stdout is not None
-        for line in process.stdout:
-            print("  | " + line, end="", flush=True)
-            stream.write(line)
-        return process.wait()
-
-
 def _metrics(path: Path) -> dict:
     if not path.is_file():
         return {}
@@ -164,19 +138,12 @@ def _metrics(path: Path) -> dict:
     return {key: value for key, value in metrics.items() if isinstance(value, (int, float, list, dict, bool))}
 
 
-def _jose_window(task: str) -> int:
-    # The canonical AMP Walk estimator selected by the architecture study is
-    # LSTM with a 25-frame, all-joint input. Other motion tasks retain their
-    # existing method-comparison setting until selected separately.
-    return 25 if task == TASKS["walk"] else 50
-
-
 def _method_output(method: str, task: str, seed: int, run_root: Path) -> Path:
     output = run_root / "methods" / METHOD_SLUGS[method]
     if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         output = output / "window_21" / "joints_all"
     elif method == "JOSE":
-        output = output / f"window_{_jose_window(task)}" / "joints_all"
+        output = output / f"window_{default_estimator_window(task)}" / "joints_all"
     return output / f"seed_{seed}"
 
 
@@ -186,8 +153,10 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         "--teacher-checkpoint", teacher, "--task", task, "--seed", str(seed),
         "--num-envs", str(args.num_envs), "--num-iterations", str(args.student_iterations),
         "--rollout-steps", str(args.student_rollout_steps), "--train-steps", str(args.student_train_steps),
-        "--eval-steps", str(args.eval_steps),
     ]
+    if args.eval_steps is not None:
+        # Otherwise train_history_student.py falls back to its own per-task default.
+        common_student.extend(["--eval-steps", str(args.eval_steps)])
     output = _method_output(method, task, seed, run_root)
     if method == "PrivilegedTeacher":
         command = [
@@ -201,7 +170,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
         command = [sys.executable, str(root / script), *common_student, "--log-dir", str(output)]
     else:
-        jose_window = _jose_window(task)
+        jose_window = default_estimator_window(task)
         command = [
             sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
             "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
@@ -234,7 +203,7 @@ def main() -> None:
     fingerprints = {task: _fingerprint(checkpoint, args.dry_run) for task, checkpoint in cases}
     signature_payload = {
         "version": FORMAT_VERSION,
-        "cases": {task: _content_identity(value) for task, value in fingerprints.items()},
+        "cases": {task: content_identity(value) for task, value in fingerprints.items()},
         "seeds": args.seeds,
         "num_envs": args.num_envs, "collect_steps": args.collect_steps,
         "estimator_epochs": args.estimator_epochs, "estimator_dagger_rounds": args.estimator_dagger_rounds,
@@ -244,7 +213,7 @@ def main() -> None:
     }
     signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True).encode()).hexdigest()[:16]
     output_root = Path(args.output_dir).resolve()
-    run_id = _slug(args.run_name) if args.run_name else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = validate_run_name(args.run_name) if args.run_name else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     studies: dict[str, Path] = {}
     catalogs: dict[str, TeacherCatalog] = {}
     for task, checkpoint in cases:
@@ -282,7 +251,7 @@ def main() -> None:
                         "config": signature_payload,
                     },
                 )
-    locks = [] if args.dry_run else [_lock(study / ".active.lock") for study in studies.values()]
+    locks = [] if args.dry_run else [acquire_run_lock(study / ".active.lock") for study in studies.values()]
     raws = {task: study / "results.jsonl" for task, study in studies.items()}
     completed = set()
     if args.resume:
@@ -310,7 +279,7 @@ def main() -> None:
             started = time.monotonic()
             started_at = datetime.now().isoformat()
             log = _method_output(method, task, seed, study) / "process.log"
-            returncode = _run(command, log)
+            returncode = run_live_subprocess(command, log)
             row = {
                 "signature": signature, "task": task, "task_id": task, "experiment": method,
                 "seed": seed, "teacher_fingerprint": fingerprints[task], "returncode": returncode,

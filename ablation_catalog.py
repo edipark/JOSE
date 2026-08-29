@@ -47,6 +47,58 @@ JOINT_SCOPE_EXPERIMENTS = (
     AblationExperiment("LSTM", 25, "upper"),
 )
 
+# Task registry shared by every ablation/comparison entry point: task key ->
+# (Gym task id, estimator adapter, default agent config entry point).
+TASKS = {
+    "amp_walk": ("Isaac-G1-AMP-Walk-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
+    "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
+    "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
+    # Manager-based walk teacher trained with rsl-rl; same estimator methodology.
+    # (The SKRL Direct PPO walk task it replaced was removed.)
+    "ppo_walk": (
+        "Isaac-G1-PPO-Walk-Estimator-JOSE-v0",
+        "ppo_walk",
+        "rsl_rl_cfg_entry_point",
+    ),
+}
+
+TRAINING_IMPLEMENTATION = (
+    "train_state_estimator.py",
+    "estimator/pipeline.py",
+    "estimator/adapters.py",
+    "estimator/models.py",
+    "schema.py",
+    "skrl_compat.py",
+    "teacher_setup.py",
+    "g1_amp_env.py",
+    "g1_amp_env_cfg.py",
+    "task_math.py",
+)
+TEACHER_IMPLEMENTATION = (
+    "evaluate_teacher.py",
+    "estimator/adapters.py",
+    "schema.py",
+    "skrl_compat.py",
+    "teacher_setup.py",
+    "g1_amp_env.py",
+    "g1_amp_env_cfg.py",
+    "task_math.py",
+)
+TASK_IMPLEMENTATION = {
+    "amp_walk": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_amp_cfg.yaml"),
+    "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
+    "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
+    "ppo_walk": (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+    ),
+}
+
 
 def window_experiments(windows: Iterable[int]) -> tuple[AblationExperiment, ...]:
     return tuple(AblationExperiment("LSTM", window, "all") for window in windows)
