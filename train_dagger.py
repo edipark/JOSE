@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser(description="JOSE G1 DAgger policy distillation
 parser.add_argument("--teacher-checkpoint", required=True)
 parser.add_argument("--task", default="Isaac-G1-AMP-Walk-JOSE-Direct-v0")
 parser.add_argument("--agent", default="skrl_amp_cfg_entry_point")
-parser.add_argument("--adapter", choices=("amp", "ppo"), default="amp")
+parser.add_argument("--adapter", choices=("amp", "ppo_walk"), default="amp")
 parser.add_argument("--num-envs", type=int, default=2048)
 parser.add_argument("--num-iterations", type=int, default=300)
 parser.add_argument("--rollout-steps", type=int, default=500)
@@ -31,6 +31,12 @@ parser.add_argument("--log-dir", default=None)
 parser.add_argument("--seed", type=int, default=42)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+from jose.teacher_setup import resolve_agent_entry_point  # noqa: E402
+
+# `--adapter ppo_walk` implies the rsl-rl runner config unless overridden.
+args_cli.agent = resolve_agent_entry_point(args_cli.adapter, args_cli.agent)
+
 sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -40,13 +46,9 @@ import json
 from pathlib import Path
 import time
 
-import gymnasium as gym
 import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
-from skrl.utils.runner.torch import Runner
-
-from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
@@ -58,28 +60,28 @@ from jose.estimator.models import (
     dagger_beta,
 )
 from jose.schema import JOINT_PRESETS, SCHEMA_VERSION
-from jose.skrl_compat import (
-    force_skrl_isaaclab_reset,
-    prepare_runner_config,
-    require_skrl_2,
-)
+from jose.teacher_setup import build_env_and_teacher
+from jose.skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg):
     torch.manual_seed(args_cli.seed)
-    agent_cfg["seed"] = args_cli.seed
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    prepare_runner_config(agent_cfg)
-    env = SkrlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg), ml_framework="torch")
-    agent_cfg["trainer"]["close_environment_at_exit"] = False
-    agent_cfg["agent"]["experiment"]["write_interval"] = 0
-    agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
-    runner = Runner(env, agent_cfg)
-    runner.agent.load(str(Path(args_cli.teacher_checkpoint).resolve()))
-    runner.agent.enable_training_mode(False, apply_to_models=True)
+    # `teacher_setup` hides the SKRL/rsl-rl difference, so `--adapter ppo_walk`
+    # loads the manager-based walk teacher through the same call.
+    env, teacher_agent = build_env_and_teacher(
+        args_cli.task,
+        args_cli.adapter,
+        env_cfg,
+        agent_cfg,
+        args_cli.teacher_checkpoint,
+        args_cli.device,
+        seed=args_cli.seed,
+    )
+    teacher_agent.enable_training_mode(False, apply_to_models=True)
     adapter = make_policy_adapter(args_cli.adapter, env, "all")
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -156,7 +158,7 @@ def main(env_cfg, agent_cfg):
         deaths = timeouts = 0
         for _ in range(args_cli.eval_steps):
             frame = adapter.estimator_input()
-            teacher_action = adapter.action(runner.agent, eval_observations)
+            teacher_action = adapter.action(teacher_agent, eval_observations)
             student_action = action_normalizer.denormalize(student(observation_normalizer.normalize(frame)))
             mse_total += float(nn.functional.mse_loss(student_action, teacher_action))
             action_norm_total += float(student_action.norm(dim=-1).mean())
@@ -210,7 +212,7 @@ def main(env_cfg, agent_cfg):
                 frame = adapter.estimator_input()
                 observation_normalizer.update(frame)
                 with torch.no_grad():
-                    teacher_action = adapter.action(runner.agent, observations)
+                    teacher_action = adapter.action(teacher_agent, observations)
                     student_action = action_normalizer.denormalize(
                         student(observation_normalizer.normalize(frame))
                     )

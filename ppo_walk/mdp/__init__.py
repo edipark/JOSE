@@ -1,13 +1,12 @@
-"""Ported verbatim from unitree_rl_lab (Apache License 2.0).
+"""MDP terms for the G1 walk task.
 
-Source: https://github.com/unitreerobotics/unitree_rl_lab
-Only import paths were adjusted for JOSE; behaviour is unchanged.
+Re-exports Isaac Lab's locomotion terms and adds the JOSE-specific rewards and
+observations on top. The upstream ``UniformLevelVelocityCommandCfg`` and the
+``lin_vel_cmd_levels`` / ``terrain_levels_vel`` curricula were removed with the
+terrain generator: the flat task samples its full command range from step 0.
 """
 
 from isaaclab.envs.mdp import *  # noqa: F401, F403
 from isaaclab_tasks.manager_based.locomotion.velocity.mdp import *  # noqa: F401, F403
 
-from .commands import *  # noqa: F401, F403
-from .curriculums import *  # noqa: F401, F403
-from .observations import *  # noqa: F401, F403
 from .rewards import *  # noqa: F401, F403

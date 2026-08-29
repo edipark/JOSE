@@ -38,19 +38,9 @@ gym.register(
     },
 )
 
-gym.register(
-    id="Isaac-G1-PPO-Walk-JOSE-Direct-v0",
-    entry_point=f"{__name__}.g1_ppo_env:G1PpoWalkEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.g1_ppo_env:G1PpoWalkEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_g1_walk_ppo_cfg.yaml",
-    },
-)
-
-# Manager-based walk task ported from unitree_rl_lab. Registered separately from
-# the `-Direct-v0` SKRL tasks above: these run on ManagerBasedRLEnv and train with
-# rsl-rl through `train_ppo_walk.py`.
+# Flat-terrain velocity-tracking walk task. Runs on ManagerBasedRLEnv and trains
+# with rsl-rl through `train_ppo_walk.py`; see `ppo_walk/walk_env_cfg.py` for why
+# its reward set diverges from the original unitree_rl_lab port.
 gym.register(
     id="Isaac-G1-PPO-Walk-JOSE-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

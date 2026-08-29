@@ -33,6 +33,16 @@ parser.add_argument("--task", type=str, default="Isaac-G1-PPO-Walk-JOSE-v0", hel
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--load_actor_only",
+    type=str,
+    default=None,
+    help=(
+        "Path to a model_*.pt to warm-start the ACTOR from. The critic and the optimizer stay freshly"
+        " initialised, so a checkpoint trained under a different reward set can seed the policy without"
+        " dragging its stale value function along. Mutually exclusive with --resume."
+    ),
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 cli_args.add_rsl_rl_args(parser)
@@ -93,6 +103,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import jose  # noqa: F401
 from jose.ppo_walk.utils.export_deploy_cfg import export_deploy_cfg
+from jose.ppo_walk.utils.checkpoint import load_actor_only
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -145,6 +156,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
+    if args_cli.load_actor_only is not None and agent_cfg.resume:
+        raise ValueError("--load_actor_only and --resume are mutually exclusive: pick one warm-start mode.")
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -177,6 +191,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(resume_path)
+    elif args_cli.load_actor_only is not None:
+        # actor weights only: keeps a stable-standing prior, discards the old
+        # critic and Adam state that belong to the old reward set.
+        load_actor_only(runner, os.path.abspath(args_cli.load_actor_only), device=agent_cfg.device)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

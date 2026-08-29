@@ -1,7 +1,18 @@
-"""Ported verbatim from unitree_rl_lab (Apache License 2.0).
+"""Reward terms for the G1 walk task.
 
-Source: https://github.com/unitreerobotics/unitree_rl_lab
-Only import paths were adjusted for JOSE; behaviour is unchanged.
+Ported from unitree_rl_lab (Apache License 2.0),
+https://github.com/unitreerobotics/unitree_rl_lab
+
+Two upstream terms were removed rather than merely unused:
+
+* ``foot_clearance_reward`` -- ``exp(-sum(z_err^2 * tanh(k*|v_foot,xy|)) / std)``
+  returns ``exp(0) = 1``, its global maximum, whenever the feet are stationary,
+  so it pays more for standing than for any gait. It is what collapsed
+  ``Isaac-G1-PPO-Walk-JOSE-v0`` to a standing policy. Isaac Lab's
+  ``feet_air_time_positive_biped`` replaces it. Tracked upstream in
+  unitree_rl_lab#80.
+* ``feet_gait`` -- forces a fixed-period gait clock the actor cannot observe,
+  since ``gait_phase`` was never part of the policy observation group.
 """
 
 from __future__ import annotations
@@ -123,17 +134,6 @@ def feet_height_body(
     return reward
 
 
-def foot_clearance_reward(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, target_height: float, std: float, tanh_mult: float
-) -> torch.Tensor:
-    """Reward the swinging feet for clearing a specified height off the ground"""
-    asset: RigidObject = env.scene[asset_cfg.name]
-    foot_z_target_error = torch.square(asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - target_height)
-    foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2))
-    reward = foot_z_target_error * foot_velocity_tanh
-    return torch.exp(-torch.sum(reward, dim=1) / std)
-
-
 def feet_too_near(
     env: ManagerBasedRLEnv, threshold: float = 0.2, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
@@ -170,40 +170,6 @@ def air_time_variance_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg
     return torch.var(torch.clip(last_air_time, max=0.5), dim=1) + torch.var(
         torch.clip(last_contact_time, max=0.5), dim=1
     )
-
-
-"""
-Feet Gait rewards.
-"""
-
-
-def feet_gait(
-    env: ManagerBasedRLEnv,
-    period: float,
-    offset: list[float],
-    sensor_cfg: SceneEntityCfg,
-    threshold: float = 0.5,
-    command_name=None,
-) -> torch.Tensor:
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    is_contact = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids] > 0
-
-    global_phase = ((env.episode_length_buf * env.step_dt) % period / period).unsqueeze(1)
-    phases = []
-    for offset_ in offset:
-        phase = (global_phase + offset_) % 1.0
-        phases.append(phase)
-    leg_phase = torch.cat(phases, dim=-1)
-
-    reward = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
-    for i in range(len(sensor_cfg.body_ids)):
-        is_stance = leg_phase[:, i] < threshold
-        reward += ~(is_stance ^ is_contact[:, i])
-
-    if command_name is not None:
-        cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
-        reward *= cmd_norm > 0.1
-    return reward
 
 
 """

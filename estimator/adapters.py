@@ -9,7 +9,6 @@ import torch
 
 from ..schema import (
     AMP_OBSERVATION_SCHEMA,
-    PPO_OBSERVATION_SCHEMA,
     PPO_WALK_OBSERVATION_SCHEMA,
     ObservationSchema,
     joint_indices,
@@ -84,13 +83,6 @@ class AmpPolicyAdapter(PolicyAdapter):
         return "amp"
 
 
-class PpoPolicyAdapter(PolicyAdapter):
-    schema = PPO_OBSERVATION_SCHEMA
-
-    def name(self) -> str:
-        return "ppo"
-
-
 class PpoWalkPolicyAdapter(PolicyAdapter):
     """Adapter for the manager-based PPO walk teacher driven by rsl-rl.
 
@@ -156,8 +148,9 @@ def make_policy_adapter(kind: str, env, joint_preset: str = "all") -> PolicyAdap
     kind = kind.lower()
     if kind == "amp":
         return AmpPolicyAdapter(env, joint_preset)
-    if kind == "ppo":
-        return PpoPolicyAdapter(env, joint_preset)
-    if kind == "ppo_walk":
+    # "ppo" named the SKRL Direct PPO walk teacher, which was removed along with
+    # its environment. It now resolves to the rsl-rl walk teacher so existing
+    # commands and logged run metadata keep working.
+    if kind in ("ppo_walk", "ppo"):
         return PpoWalkPolicyAdapter(env, joint_preset)
-    raise ValueError(f"Unknown policy adapter {kind!r}; choose amp, ppo, or ppo_walk")
+    raise ValueError(f"Unknown policy adapter {kind!r}; choose amp or ppo_walk")

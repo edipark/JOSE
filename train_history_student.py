@@ -20,7 +20,7 @@ parser.add_argument("--method", choices=("joint_only", "imu"), required=True)
 parser.add_argument("--teacher-checkpoint", required=True)
 parser.add_argument("--task", default="Isaac-G1-AMP-Walk-JOSE-Direct-v0")
 parser.add_argument("--agent", default="skrl_amp_cfg_entry_point")
-parser.add_argument("--adapter", choices=("amp", "ppo"), default="amp")
+parser.add_argument("--adapter", choices=("amp", "ppo_walk"), default="amp")
 parser.add_argument("--window", type=int, default=21)
 parser.add_argument("--num-envs", type=int, default=1024)
 parser.add_argument("--num-iterations", type=int, default=300)
@@ -42,6 +42,12 @@ parser.add_argument("--log-dir", default=None)
 parser.add_argument("--seed", type=int, default=42)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+from jose.teacher_setup import resolve_agent_entry_point  # noqa: E402
+
+# `--adapter ppo_walk` implies the rsl-rl runner config unless overridden.
+args_cli.agent = resolve_agent_entry_point(args_cli.adapter, args_cli.agent)
+
 sys.argv = [sys.argv[0], *hydra_args]
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -51,13 +57,10 @@ import json
 from pathlib import Path
 import time
 
-import gymnasium as gym
 import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
-from skrl.utils.runner.torch import Runner
 
-from isaaclab_rl.skrl import SkrlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
@@ -73,7 +76,8 @@ from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, Senso
 from jose.estimator.adapters import make_policy_adapter
 from jose.estimator.models import ReplayBuffer, RunningNormalizer
 from jose.schema import SCHEMA_VERSION
-from jose.skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, prepare_runner_config, require_skrl_2
+from jose.teacher_setup import build_env_and_teacher
+from jose.skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, require_skrl_2
 
 
 def _sensor_state(core) -> dict[str, torch.Tensor]:
@@ -91,19 +95,21 @@ def main(env_cfg, agent_cfg):
     if args_cli.window <= 0:
         raise ValueError("--window must be positive")
     torch.manual_seed(args_cli.seed)
-    prepare_runner_config(agent_cfg)
-    agent_cfg["seed"] = args_cli.seed
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    raw_env = gym.make(args_cli.task, cfg=env_cfg)
-    env = SkrlVecEnvWrapper(raw_env, ml_framework="torch")
-    agent_cfg["trainer"]["close_environment_at_exit"] = False
-    agent_cfg["agent"]["experiment"]["write_interval"] = 0
-    agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
-    runner = Runner(env, agent_cfg)
-    runner.agent.load(str(Path(args_cli.teacher_checkpoint).resolve()))
-    runner.agent.enable_training_mode(False, apply_to_models=True)
+    # `teacher_setup` hides the SKRL/rsl-rl difference, so `--adapter ppo_walk`
+    # loads the manager-based walk teacher through the same call.
+    env, teacher_agent = build_env_and_teacher(
+        args_cli.task,
+        args_cli.adapter,
+        env_cfg,
+        agent_cfg,
+        args_cli.teacher_checkpoint,
+        args_cli.device,
+        seed=args_cli.seed,
+    )
+    teacher_agent.enable_training_mode(False, apply_to_models=True)
     adapter = make_policy_adapter(args_cli.adapter, env, "all")
     core = adapter.core_env
     device = torch.device(core.device)
@@ -210,7 +216,7 @@ def main(env_cfg, agent_cfg):
         inference_elapsed = 0.0
         for _ in range(args_cli.eval_steps):
             flattened = history.push(frame(use_corruption))
-            teacher = adapter.action(runner.agent, observations)
+            teacher = adapter.action(teacher_agent, observations)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             inference_started = time.perf_counter()
@@ -234,7 +240,7 @@ def main(env_cfg, agent_cfg):
             raw_task_reward += float(rewards.mean())
             extras = getattr(core, "extras", {})
             components = (
-                amp_reward_components(runner.agent, extras.get("amp_obs"), rewards)
+                amp_reward_components(teacher_agent, extras.get("amp_obs"), rewards)
                 if extras.get("amp_obs") is not None else None
             )
             if components is not None:
@@ -289,7 +295,7 @@ def main(env_cfg, agent_cfg):
                 flattened = history.push(frame(True))
                 observation_normalizer.update(flattened)
                 with torch.no_grad():
-                    teacher = adapter.action(runner.agent, observations)
+                    teacher = adapter.action(teacher_agent, observations)
                     predicted = action_normalizer.denormalize(student(observation_normalizer.normalize(flattened)))
                 action_normalizer.update(teacher)
                 # OmniH2O-style on-policy DAgger: the deployable student owns
