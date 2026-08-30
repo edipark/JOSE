@@ -87,6 +87,23 @@ class G1AmpJumpEnvCfg(G1AmpEnvCfg):
     motion_file = os.path.join(MOTIONS_DIR, "G1_jump.npz")
     reset_strategy = "random"
     episode_length_s = 10.0
-    termination_height = 0.30
+    # The reference pelvis dips to 0.241 m at the bottom of the countermovement
+    # crouch that launches each jump. A threshold above that outlaws the crouch:
+    # at 0.28 it cut 2.6% of reference frames, the measured height-death rate was
+    # 2.9%, and the policy backed away to a 0.361 m minimum and could only manage
+    # a 0.194 s hop against the reference's 0.708 s flight. Keep this below 0.241.
+    termination_height = 0.2
     action_second_difference_penalty_weight = 0.0
+    # A longer AMP window was tried here and did not work. The reasoning was that
+    # the shared 4-step window spans only 60 ms, about 8% of one flight phase, so
+    # the discriminator judges near-instantaneous poses and a short hop looks as
+    # real as a long jump. `num_amp_observations = 12` (220 ms) was trained to
+    # 200k timesteps and measured: it produced the deepest crouch of any run
+    # (pelvis min 0.28 m, mean 0.45 m against the reference's 0.24 / 0.50) but
+    # almost stopped jumping -- 6.2% airborne and 1.8 jumps/10 s, against 25.7%
+    # and 7.1 for the same threshold at 4 steps. It was not undertrained: the
+    # style reward rose from 0.45 to 0.55 and then flattened from 140k on, and the
+    # 100k and 200k checkpoints measure identically. Widening the window appears
+    # to strengthen the discriminator faster than the policy can follow, and the
+    # policy settles for a safe crouch. Keep the shared 4-step window.
 

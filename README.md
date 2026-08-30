@@ -154,15 +154,16 @@ python -m jose.train \
 JOSE from [unitree_rl_lab](https://github.com/unitreerobotics/unitree_rl_lab)
 (Apache License 2.0). Unlike the `-Direct-v0` tasks it is a manager-based Isaac
 Lab environment trained with `rsl-rl`, and it follows a full locomotion recipe:
-generated terrain with a difficulty curriculum, a command curriculum that grows
-the commanded velocity range, contact sensors, gait and foot-clearance rewards,
-domain randomization, and a privileged critic.
+flat terrain, a fixed full-range velocity command, foot contact sensors, gait and
+posture rewards, and a privileged critic.
 
-**The training recipe is unchanged from upstream.** Every reward weight, command
-range, event, termination, curriculum term, network size and PPO hyperparameter
-is carried over verbatim. You can verify this yourself by diffing
-`ppo_walk/mdp/*.py`, `ppo_walk/walk_env_cfg.py` and
-`ppo_walk/agents/rsl_rl_ppo_cfg.py` against the upstream repository.
+**The scene, action space, terminations and PPO hyperparameters are the upstream
+ones**; the network sizes and every algorithm hyperparameter are carried over
+verbatim. The reward set, the command sampler and the terrain are **not**: the
+upstream recipe converged to a policy that stands still, so those were replaced.
+The effective values live in `ppo_walk/walk_env_cfg.py` and
+`ppo_walk/agents/rsl_rl_ppo_cfg.py`; the reasoning is in
+[Flat-terrain command tracking](#flat-terrain-command-tracking).
 
 ### Setup
 
@@ -235,54 +236,6 @@ python train_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --headless \
   --num_envs 64 --max_iterations 5
 ```
 
-#### Defaults
-
-These are the values already in `ppo_walk/agents/rsl_rl_ppo_cfg.py` and
-`ppo_walk/walk_env_cfg.py`. You do not need to pass any of them; they are listed
-so you know what a bare `train_ppo_walk.py` run is actually doing.
-
-**Runner / PPO** (`ppo_walk/agents/rsl_rl_ppo_cfg.py`)
-
-| Setting | Default | Setting | Default |
-|---|---|---|---|
-| `max_iterations` | `50000` | `learning_rate` | `1.0e-3` |
-| `num_steps_per_env` | `24` | `schedule` | `adaptive` |
-| `save_interval` | `100` | `desired_kl` | `0.01` |
-| `num_learning_epochs` | `5` | `gamma` | `0.99` |
-| `num_mini_batches` | `4` | `lam` | `0.95` |
-| `clip_param` | `0.2` | `max_grad_norm` | `1.0` |
-| `entropy_coef` | `0.01` | `value_loss_coef` | `1.0` |
-| `actor_hidden_dims` | `[512, 256, 128]` | `use_clipped_value_loss` | `True` |
-| `critic_hidden_dims` | `[512, 256, 128]` | `init_noise_std` | `1.0` |
-| `activation` | `elu` | `empirical_normalization` | `False` |
-| `obs_groups` | `{"actor": ["policy"], "critic": ["critic"]}` | `clip_actions` | `None` (no clipping) |
-| `seed` | `42` | `device` | `cuda:0` |
-| `logger` | `tensorboard` | `experiment_name` | derived from the task ID |
-
-With the defaults, one iteration collects `4096 envs x 24 steps = 98304`
-transitions and takes 5 epochs over 4 minibatches.
-
-**Environment** (`ppo_walk/walk_env_cfg.py`)
-
-| Setting | Default | Note |
-|---|---|---|
-| `scene.num_envs` | `4096` | `64` for the play config |
-| `sim.dt` | `0.005` | 200 Hz physics |
-| `decimation` | `4` | 50 Hz policy, so `step_dt = 0.02` |
-| `episode_length_s` | `20.0` | 1000 policy steps per episode |
-| action scale | `0.25` | joint position offsets from the default pose |
-| `history_length` | `5` | on both the policy and critic groups |
-| command resample | every `10.0` s | no curriculum; the full range is sampled from step 0 |
-| command range | `lin_x [0, 1.0]`, `lin_y [-0.5, 0.5]`, `ang_z [-1.0, 1.0]` | official Isaac Lab G1 flat ranges |
-| terrain | flat plane | no generator, no height scanner |
-| terminations | timeout, base height `< 0.2` m, tilt `> 0.8` rad | |
-
-To change any of them, edit the config file rather than passing flags. Note that
-the reward weights and command ranges are not free parameters: the combination in
-the file is the one that was measured to walk, and several nearby combinations
-were measured to produce a statue. See
-[Flat-terrain command tracking](#flat-terrain-command-tracking) before retuning.
-
 #### Command-line options
 
 | Option | Default | Purpose |
@@ -293,13 +246,26 @@ were measured to produce a statue. See
 | `--max_iterations` | from config (`50000`) | Override the iteration count |
 | `--seed` | from config (`42`) | Seed; `-1` picks a random one |
 | `--device` | `cuda:0` | GPU to use |
+| `--experiment_name` | from config (`isaac_g1_ppo_walk_jose_v0`) | Log directory under `logs/rsl_rl/` |
 | `--run_name` | none | Suffix appended to the run directory name |
 | `--resume` | off | Continue from a saved checkpoint |
-| `--load_run` | latest | Which run directory to resume from |
-| `--checkpoint` | latest | Which checkpoint file to resume from |
+| `--load_run` | latest (`.*`) | Which run directory to resume from |
+| `--checkpoint` | latest (`model_.*.pt`) | Which checkpoint file to resume from |
+| `--load_actor_only` | none | Warm-start the actor only; mutually exclusive with `--resume` |
 | `--logger` | `tensorboard` | `tensorboard`, `wandb`, or `neptune` |
-| `--video` | off | Record training clips (needs `--enable_cameras`) |
+| `--log_project_name` | none | Project name for `wandb` / `neptune` |
+| `--video` | off | Record training clips (implies `--enable_cameras`) |
+| `--video_length` | `200` steps | Length of each recorded clip |
+| `--video_interval` | `2000` steps | Steps between recordings |
 | `--distributed` | off | Multi-GPU training via `torchrun` |
+
+Anything not in this table -- reward weights, command ranges, network sizes, PPO
+hyperparameters -- is set in `ppo_walk/walk_env_cfg.py` and
+`ppo_walk/agents/rsl_rl_ppo_cfg.py` and has to be edited there. The reward
+weights and command ranges are not free parameters: the combination in the file
+is the one that was measured to walk, and several nearby combinations were
+measured to produce a statue. See
+[Flat-terrain command tracking](#flat-terrain-command-tracking) before retuning.
 
 #### Output layout
 
@@ -368,8 +334,9 @@ python play_ppo_walk.py --task Isaac-G1-PPO-Walk-JOSE-v0 --num_envs 32
 ```
 
 This loads the latest checkpoint, writes `exported/policy.pt` (TorchScript) and
-`exported/policy.onnx` next to it, and then runs the policy. Playback uses 32
-environments on easier terrain with the command range opened to its full limits.
+`exported/policy.onnx` next to it, and then runs the policy. The play config
+(`G1WalkPlayEnvCfg`) defaults to 64 environments with observation noise and the
+reset push disabled and a 60 s episode; `--num_envs` overrides the count.
 
 To play a specific checkpoint, and to run at wall-clock speed:
 
@@ -442,9 +409,9 @@ needed; none of them change a training hyperparameter.
 | Policy export goes through `runner.export_policy_to_jit/onnx` | `rsl-rl` ≥ 4.0 stores the actor and critic as separate models, so the runner owns the export. |
 | `argcomplete` task autocompletion dropped | It is not a JOSE dependency, and `--task` accepts any registered task ID. |
 
-You can confirm the routing worked: at startup the actor prints 480 input
-features (96 observations × 5 history steps) and the critic prints 495, because
-the critic additionally sees the privileged `base_lin_vel`.
+You can confirm the routing worked: at startup both the actor and the critic
+print 495 input features (99 observations × 5 history steps). They see the same
+terms; the critic's privilege is that its copy carries no observation noise.
 
 ## State estimator
 
