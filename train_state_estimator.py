@@ -285,6 +285,9 @@ def main(env_cfg, agent_cfg):
         args_cli.lr, args_cli.device, epoch_logger,
     )
     epoch_offset += args_cli.epochs
+    # Counts optimizer steps, not epochs, so it lines up with train_history_student.py's
+    # cumulative_gradient_steps on a shared "compute spent" x-axis for learning-curve plots.
+    cumulative_gradient_steps = training["gradient_steps"]
     log_event("phase2/complete", best_validation_mse=training["best_validation_mse"])
     closed_loop = evaluate_estimator_closed_loop(
         env,
@@ -303,6 +306,7 @@ def main(env_cfg, agent_cfg):
         "collection": initial_collections,
         "training": training,
         "evaluation": closed_loop,
+        "cumulative_gradient_steps": cumulative_gradient_steps,
     }]
     for name, value in closed_loop.items():
         if isinstance(value, (int, float)):
@@ -331,6 +335,13 @@ def main(env_cfg, agent_cfg):
             ratio = args_cli.dagger_est_ratio + progress * (
                 args_cli.dagger_est_ratio_final - args_cli.dagger_est_ratio
             )
+        # Always DAgger-correct from the best closed-loop checkpoint seen so far,
+        # not from wherever the last round happened to land. Without this, a
+        # round that regresses (round-level "best epoch" is chosen by held-out
+        # regression loss, which doesn't always track closed-loop performance)
+        # collects the *next* round's on-policy data with that regressed
+        # policy too, compounding instead of correcting.
+        estimator.load_state_dict(best_state)
         log_event("dagger/start", round=round_index, total=total_rounds, estimator_ratio=ratio)
         collection_started = time.monotonic()
         new_data, collection = collect_rollout(
@@ -374,6 +385,7 @@ def main(env_cfg, agent_cfg):
             dagger_epoch_logger,
         )
         epoch_offset += args_cli.dagger_epochs
+        cumulative_gradient_steps += training["gradient_steps"]
         closed_loop = evaluate_estimator_closed_loop(
             env,
             adapter,
@@ -393,6 +405,7 @@ def main(env_cfg, agent_cfg):
                 "collection": collection,
                 "training": training,
                 "evaluation": closed_loop,
+                "cumulative_gradient_steps": cumulative_gradient_steps,
             }
         )
         writer.add_scalar("DAgger/estimator_ratio", ratio, round_index)
@@ -472,6 +485,12 @@ def main(env_cfg, agent_cfg):
     )
     metrics["best_round"] = best_round
     metrics["rounds"] = rounds
+    metrics["total_gradient_steps"] = cumulative_gradient_steps
+    # One entry per evaluated round on a step-indexed x-axis, so reporting.py can plot it
+    # against train_history_student.py's own learning_curve on a shared "compute spent" axis.
+    metrics["learning_curve"] = [
+        {"step": row["cumulative_gradient_steps"], **row["evaluation"]} for row in rounds
+    ]
     metrics["wall_time_s"] = time.monotonic() - started
     save_jose_checkpoint(output / "best_estimator.pt", estimator, adapter, args_cli.task, window, metrics)
     (output / "training.json").write_text(

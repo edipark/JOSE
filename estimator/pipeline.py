@@ -348,6 +348,7 @@ def _fit_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
     best_loss, best_state = float("inf"), None
     history = []
+    gradient_steps = 0
     for epoch in range(epochs):
         model.train()
         permutation = training_ids[torch.randperm(len(training_ids))]
@@ -361,6 +362,7 @@ def _fit_model(
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_total += float(loss) * len(ids)
+            gradient_steps += 1
         model.eval()
         with torch.no_grad():
             validation_loss = float(
@@ -374,7 +376,7 @@ def _fit_model(
             best_loss = validation_loss
             best_state = copy.deepcopy(model.state_dict())
     model.load_state_dict(best_state)
-    return {"best_validation_mse": best_loss, "epochs": history}
+    return {"best_validation_mse": best_loss, "epochs": history, "gradient_steps": gradient_steps}
 
 
 def train_estimator(

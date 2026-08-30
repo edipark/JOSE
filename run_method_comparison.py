@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -75,10 +76,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--collect-steps", type=int, default=2000)
     parser.add_argument("--estimator-epochs", type=int, default=50)
     parser.add_argument("--estimator-dagger-rounds", type=int, default=10)
+    parser.add_argument("--estimator-dagger-epochs", type=int, default=10)
     parser.add_argument("--estimator-max-dataset-size", type=int, default=250000)
     parser.add_argument("--student-iterations", type=int, default=300)
     parser.add_argument("--student-rollout-steps", type=int, default=250)
-    parser.add_argument("--student-train-steps", type=int, default=100)
+    parser.add_argument(
+        "--student-train-steps", type=int, default=None,
+        help="Gradient steps per student iteration (default: sized so total student gradient "
+        "steps across --student-iterations matches the estimator's own training budget -- "
+        "see _estimator_gradient_steps)",
+    )
     parser.add_argument(
         "--eval-steps", type=int, default=None,
         help="Rollout steps per student evaluation call (default: the task's own max episode "
@@ -94,6 +101,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fast", action="store_true")
     return parser
+
+
+def _estimator_gradient_steps(args: argparse.Namespace) -> int:
+    """Expected optimizer steps across the JOSE estimator's DAgger rounds.
+
+    Mirrors estimator/pipeline.py:_fit_model's batching: each epoch iterates the
+    dataset once, holding out min(10%, 10000) samples for validation, at a fixed
+    batch_size=1024 (that script's own default; not exposed as a flag here).
+
+    Deliberately excludes the initial --estimator-epochs supervised warm start
+    on round 0: that phase fits a fixed dataset with no on-policy component and
+    has no equivalent in the student's training (which is on-policy DAgger from
+    iteration 1), so it isn't a comparable unit of "training" to size the
+    student's budget against -- only the --estimator-dagger-rounds rounds of
+    on-policy refinement are.
+    """
+    batch_size = 1024
+    dataset_size = args.estimator_max_dataset_size
+    validation_size = max(1, min(dataset_size // 10, 10000))
+    batches_per_epoch = math.ceil((dataset_size - validation_size) / batch_size)
+    return args.estimator_dagger_rounds * args.estimator_dagger_epochs * batches_per_epoch
 
 
 def _fingerprint(path: str, dry_run: bool) -> dict:
@@ -140,19 +168,21 @@ def _metrics(path: Path) -> dict:
 
 def _method_output(method: str, task: str, seed: int, run_root: Path) -> Path:
     output = run_root / "methods" / METHOD_SLUGS[method]
-    if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
-        output = output / "window_21" / "joints_all"
-    elif method == "JOSE":
+    if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE"):
         output = output / f"window_{default_estimator_window(task)}" / "joints_all"
     return output / f"seed_{seed}"
 
 
 def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Path) -> tuple[list[str], Path]:
     root = Path(__file__).parent
+    # Every trained method sees the same history length, so window size isn't
+    # a confound in the comparison.
+    window = default_estimator_window(task)
     common_student = [
         "--teacher-checkpoint", teacher, "--task", task, "--seed", str(seed),
         "--num-envs", str(args.num_envs), "--num-iterations", str(args.student_iterations),
         "--rollout-steps", str(args.student_rollout_steps), "--train-steps", str(args.student_train_steps),
+        "--window", str(window),
     ]
     if args.eval_steps is not None:
         # Otherwise train_history_student.py falls back to its own per-task default.
@@ -170,14 +200,14 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
         command = [sys.executable, str(root / script), *common_student, "--log-dir", str(output)]
     else:
-        jose_window = default_estimator_window(task)
         command = [
             sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
             "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
-            "--dagger-rounds", str(args.estimator_dagger_rounds), "--estimator", "LSTM",
+            "--dagger-rounds", str(args.estimator_dagger_rounds),
+            "--dagger-epochs", str(args.estimator_dagger_epochs), "--estimator", "LSTM",
             "--max-dataset-size", str(args.estimator_max_dataset_size),
-            "--window", str(jose_window), "--joint-preset", "all", "--output-dir", str(output.parent),
+            "--window", str(window), "--joint-preset", "all", "--output-dir", str(output.parent),
             "--run-name", output.name,
         ]
     if args.headless:
@@ -195,11 +225,17 @@ def main() -> None:
         args.collect_steps = 50
         args.estimator_epochs = 2
         args.estimator_dagger_rounds = 1
+        args.estimator_dagger_epochs = 2
         args.estimator_max_dataset_size = min(args.estimator_max_dataset_size, 20000)
         args.student_iterations = 2
         args.student_rollout_steps = 20
         args.student_train_steps = 5
         args.eval_steps = 50
+    elif args.student_train_steps is None:
+        # Size the student's per-iteration gradient steps so its total across
+        # --student-iterations matches the estimator's own training budget --
+        # see _estimator_gradient_steps for why this isn't a per-round multiply.
+        args.student_train_steps = max(1, _estimator_gradient_steps(args) // args.student_iterations)
     fingerprints = {task: _fingerprint(checkpoint, args.dry_run) for task, checkpoint in cases}
     signature_payload = {
         "version": FORMAT_VERSION,
@@ -207,6 +243,7 @@ def main() -> None:
         "seeds": args.seeds,
         "num_envs": args.num_envs, "collect_steps": args.collect_steps,
         "estimator_epochs": args.estimator_epochs, "estimator_dagger_rounds": args.estimator_dagger_rounds,
+        "estimator_dagger_epochs": args.estimator_dagger_epochs,
         "estimator_max_dataset_size": args.estimator_max_dataset_size,
         "student_iterations": args.student_iterations, "student_rollout_steps": args.student_rollout_steps,
         "student_train_steps": args.student_train_steps, "eval_steps": args.eval_steps,

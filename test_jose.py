@@ -589,7 +589,7 @@ def test_method_comparison_accepts_one_to_three_cases(tmp_path):
     assert "2 task(s), 1 seed(s), 8 jobs" in result.stdout
     assert all(method in result.stdout for method in ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE"))
     assert "/studies/method_comparison/paper_baseline" in result.stdout
-    assert "/methods/imu_based_distillation/window_21/joints_all/seed_7" in result.stdout
+    assert "/methods/imu_based_distillation/window_25/joints_all/seed_7" in result.stdout
     assert "/amp_walk/" in result.stdout
     assert "/methods/jose/window_25/joints_all/seed_7" in result.stdout
     assert "/amp_jump/" in result.stdout

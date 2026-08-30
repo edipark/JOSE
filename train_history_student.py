@@ -298,6 +298,7 @@ def main(env_cfg, agent_cfg):
     force_skrl_isaaclab_reset(env)
     observations, _ = env.reset()
     started = time.monotonic()
+    cumulative_gradient_steps = 0
     try:
         for iteration in range(1, args_cli.num_iterations + 1):
             student.eval()
@@ -338,6 +339,7 @@ def main(env_cfg, agent_cfg):
                 nn.utils.clip_grad_norm_(student.parameters(), 1.0)
                 optimizer.step()
                 loss_total += float(loss)
+            cumulative_gradient_steps += train_steps
             scheduler.step()
             writer.add_scalar("Loss/mse", loss_total / train_steps, iteration)
             save(iteration, "student_latest.pt")
@@ -352,7 +354,7 @@ def main(env_cfg, agent_cfg):
             if iteration % args_cli.eval_interval == 0 or iteration == args_cli.num_iterations:
                 corrupted = evaluate(True)
                 clean = evaluate(False) if args_cli.method == "imu" else dict(corrupted)
-                row = {"iteration": iteration, **corrupted, "clean_sensor_metrics": clean}
+                row = {"iteration": iteration, "step": cumulative_gradient_steps, **corrupted, "clean_sensor_metrics": clean}
                 evaluations.append(row)
                 if corrupted["episode_length_mean"] > best_length:
                     best_length = corrupted["episode_length_mean"]
@@ -366,8 +368,16 @@ def main(env_cfg, agent_cfg):
     finally:
         writer.close()
         env.close()
+    # One entry per evaluated iteration on a step-indexed x-axis, so reporting.py can plot
+    # it against train_state_estimator.py's own learning_curve on a shared "compute spent" axis.
+    learning_curve = [
+        {key: value for key, value in row.items() if key != "clean_sensor_metrics"} for row in evaluations
+    ]
     result = {
-        "metrics": {**best_metrics, "best_iteration": best_iteration},
+        "metrics": {
+            **best_metrics, "best_iteration": best_iteration,
+            "total_gradient_steps": cumulative_gradient_steps, "learning_curve": learning_curve,
+        },
         "evaluations": evaluations,
         "method": args_cli.method,
         "window": args_cli.window,

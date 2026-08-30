@@ -20,6 +20,10 @@ PRIMARY_METRICS = (
     "wall_time_s", "collection_duration_s", "collection_samples_per_s",
 )
 
+# Metrics plotted against metrics.learning_curve's "step" (cumulative gradient
+# steps) when present -- see _plots()'s learning_curves figure.
+LEARNING_CURVE_METRICS = ("return_mean", "episode_length_mean", "rmse", "death_rate", "teacher_action_mse")
+
 REQUIRED_REPORT_FILES = (
     "summary.json", "summary.csv", "results_tidy.csv", "table.md", "table.tex", "report.md",
 )
@@ -27,7 +31,7 @@ REQUIRED_PLOT_FILES = tuple(
     f"{stem}.{suffix}"
     for stem in (
         "episode_length_mean", "death_rate", "timeout_rate", "return_mean", "rmse", "pareto",
-        "target_rmse_heatmap", "dagger_learning_curve", "representative_trace",
+        "target_rmse_heatmap", "dagger_learning_curve", "representative_trace", "learning_curves",
     )
     for suffix in ("png", "pdf")
 )
@@ -268,6 +272,91 @@ def _plots(output: Path, rows: list[dict], raw_rows: list[dict]) -> tuple[list[s
         plt.close(figure)
     else:
         skipped["representative_trace"] = "no raw rows had both metrics.trace_target and metrics.trace_prediction"
+    curve_rows = [row for row in raw_rows if row.get("status") == "ok" and row.get("metrics", {}).get("learning_curve")]
+    curve_metrics = [
+        metric for metric in LEARNING_CURVE_METRICS
+        if any(
+            isinstance(point.get(metric), (int, float))
+            for row in curve_rows for point in row["metrics"]["learning_curve"]
+        )
+    ] if curve_rows else []
+    if curve_metrics:
+        baseline_rows = [
+            row for row in raw_rows
+            if row.get("status") == "ok" and not row.get("metrics", {}).get("learning_curve")
+        ]
+
+        def group_label(row: dict) -> str:
+            teacher_id = row.get("teacher_id")
+            return f"{row.get('experiment')}/{teacher_id}" if teacher_id else str(row.get("experiment"))
+
+        curve_groups: dict[str, list[dict]] = defaultdict(list)
+        for row in curve_rows:
+            curve_groups[group_label(row)].append(row)
+        baseline_groups: dict[str, list[dict]] = defaultdict(list)
+        for row in baseline_rows:
+            baseline_groups[group_label(row)].append(row)
+        # Fix each group's color up front. A given metric (e.g. rmse) isn't
+        # present for every group, so per-axis auto-cycling would otherwise
+        # assign colors in whatever order each subplot happens to draw them in
+        # -- e.g. JOSE silently taking IMU-BasedDistillation's blue on the one
+        # subplot where IMU has no data to plot.
+        color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+        group_colors = {
+            label: color_cycle[index % len(color_cycle)]
+            for index, label in enumerate(sorted(curve_groups))
+        }
+
+        figure, curve_axes = plt.subplots(
+            len(curve_metrics), 1, figsize=(9, 3.2 * len(curve_metrics)), sharex=True, squeeze=False,
+        )
+        curve_axes = curve_axes[:, 0]
+        for axis, metric in zip(curve_axes, curve_metrics):
+            for label, rows in sorted(curve_groups.items()):
+                # Seeds share the same eval_interval, so their snapshots land on
+                # the same step values -- group by step to get a mean/std band
+                # instead of one noisy line per seed.
+                by_step: dict[float, list[float]] = defaultdict(list)
+                for row in rows:
+                    for point in row["metrics"]["learning_curve"]:
+                        value, step = point.get(metric), point.get("step")
+                        if isinstance(value, (int, float)) and isinstance(step, (int, float)):
+                            by_step[step].append(value)
+                if not by_step:
+                    continue
+                steps = sorted(by_step)
+                means = [mean(by_step[step]) for step in steps]
+                spreads = [stdev(by_step[step]) if len(by_step[step]) > 1 else 0.0 for step in steps]
+                color = group_colors[label]
+                axis.plot(steps, means, linewidth=2, marker="o", markersize=3, color=color, label=f"{label} (n={len(rows)})")
+                axis.fill_between(
+                    steps, [m - s for m, s in zip(means, spreads)], [m + s for m, s in zip(means, spreads)],
+                    color=color, alpha=0.18, linewidth=0,
+                )
+            for label, rows in sorted(baseline_groups.items()):
+                values = [row["metrics"][metric] for row in rows if isinstance(row.get("metrics", {}).get(metric), (int, float))]
+                if not values:
+                    continue
+                center, spread = mean(values), stdev(values) if len(values) > 1 else 0.0
+                axis.axhline(center, linestyle="--", linewidth=1.5, alpha=0.7, color="0.3", label=f"{label} (fixed, n={len(values)})")
+                if spread > 0.0:
+                    axis.axhspan(center - spread, center + spread, color="0.3", alpha=0.1, linewidth=0)
+            axis.set_ylabel(metric)
+            axis.grid(alpha=0.25)
+        curve_axes[-1].set_xlabel("Cumulative gradient steps")
+        curve_axes[0].set_title("Training curves (mean ± std across seeds, shared gradient-step axis)")
+        curve_axes[0].legend(fontsize=7, ncol=2)
+        figure.tight_layout()
+        for suffix in ("png", "pdf"):
+            path = output / f"learning_curves.{suffix}"
+            figure.savefig(path)
+            artifacts.append(path.name)
+        plt.close(figure)
+    else:
+        skipped["learning_curves"] = (
+            "no raw rows had metrics.learning_curve" if not curve_rows
+            else "learning_curve entries had none of the tracked metrics"
+        )
     return artifacts, skipped
 
 
