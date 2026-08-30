@@ -335,13 +335,15 @@ def main(env_cfg, agent_cfg):
             ratio = args_cli.dagger_est_ratio + progress * (
                 args_cli.dagger_est_ratio_final - args_cli.dagger_est_ratio
             )
-        # Always DAgger-correct from the best closed-loop checkpoint seen so far,
-        # not from wherever the last round happened to land. Without this, a
-        # round that regresses (round-level "best epoch" is chosen by held-out
-        # regression loss, which doesn't always track closed-loop performance)
-        # collects the *next* round's on-policy data with that regressed
-        # policy too, compounding instead of correcting.
-        estimator.load_state_dict(best_state)
+        # Each round continues from wherever the previous one landed, and the
+        # eplen-first best_score below still decides which round is reported and
+        # saved. Resuming from best_state instead was tried and reverted: rounds
+        # 4-10 then all restarted from the same peak and each one destroyed it,
+        # which showed the regression is in the per-round fit (best epoch is
+        # picked by held-out regression loss, which doesn't track closed-loop
+        # performance), not in the round-to-round handoff. Keeping the original
+        # handoff also keeps this comparable to the architecture/window/
+        # joint_scope studies, which were all run this way.
         log_event("dagger/start", round=round_index, total=total_rounds, estimator_ratio=ratio)
         collection_started = time.monotonic()
         new_data, collection = collect_rollout(
