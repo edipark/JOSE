@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from datetime import datetime
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -29,7 +28,10 @@ try:
         normalize_experiments,
         write_json,
     )
-    from .ablation_common import acquire_run_lock, content_identity, file_fingerprint, run_live_subprocess
+    from .ablation_common import (
+        acquire_run_lock, content_identity, file_fingerprint, implementation_fingerprint,
+        run_live_subprocess,
+    )
     from .reporting import aggregate, generate_report
 except ImportError:
     from ablation_catalog import (
@@ -44,7 +46,10 @@ except ImportError:
         normalize_experiments,
         write_json,
     )
-    from ablation_common import acquire_run_lock, content_identity, file_fingerprint, run_live_subprocess
+    from ablation_common import (
+        acquire_run_lock, content_identity, file_fingerprint, implementation_fingerprint,
+        run_live_subprocess,
+    )
     from reporting import aggregate, generate_report
 
 
@@ -52,16 +57,6 @@ except ImportError:
 # window experiments, so every cache is collected for at least this many
 # frames regardless of what the experiment itself asks for.
 MIN_DATASET_CACHE_WINDOW = 50
-
-
-def _implementation_fingerprint(paths: tuple[str, ...]) -> str:
-    digest = hashlib.sha256()
-    root = Path(__file__).parent
-    for relative in paths:
-        path = root / relative
-        digest.update(relative.encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
 
 
 def _extract_metrics(training_json: Path) -> dict:
@@ -320,8 +315,8 @@ def main(
         matrix.extend((seed, experiment.slug, experiment) for experiment in selected)
 
     task_implementation = TASK_IMPLEMENTATION[args.task]
-    training_implementation = _implementation_fingerprint(TRAINING_IMPLEMENTATION + task_implementation)
-    teacher_implementation = _implementation_fingerprint(TEACHER_IMPLEMENTATION + task_implementation)
+    training_implementation = implementation_fingerprint(TRAINING_IMPLEMENTATION + task_implementation)
+    teacher_implementation = implementation_fingerprint(TEACHER_IMPLEMENTATION + task_implementation)
     jobs = []
     for seed, name, experiment in matrix:
         spec = _job_spec(

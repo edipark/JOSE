@@ -36,6 +36,11 @@ parser.add_argument(
 )
 parser.add_argument("--eval-interval", type=int, default=20)
 parser.add_argument(
+    "--mpjpe-horizon", type=int, default=100,
+    help="Steps of teacher-paired rollout used for the MPJPE motion-fidelity metrics. "
+    "Bounded because the two trajectories diverge chaotically once the policies differ.",
+)
+parser.add_argument(
     "--eval-steps", type=int, default=None,
     help="Rollout steps per evaluation call (default: the task's own max episode length, "
     "so evaluation reaches the same natural episode boundary as the teacher)",
@@ -83,10 +88,12 @@ from jose.distillation.history import (
 )
 from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, SensorCorruptor
 from jose.estimator.adapters import make_policy_adapter
+from jose.estimator.metrics import MetricAccumulator, step_metrics
 from jose.estimator.models import ReplayBuffer, RunningNormalizer
+from jose.estimator.pipeline import evaluate_paired_motion_fidelity
 from jose.schema import SCHEMA_VERSION
 from jose.teacher_setup import build_env_and_teacher
-from jose.skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, require_skrl_2
+from jose.skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 
 
 def _sensor_state(core) -> dict[str, torch.Tensor]:
@@ -157,6 +164,8 @@ def main(env_cfg, agent_cfg):
     best_metrics: dict = {}
     best_length = float("-inf")
     best_iteration = 0
+    best_state: dict | None = None
+    fidelity: dict = {}
 
     def frame(use_corruption: bool = True) -> torch.Tensor:
         state = _sensor_state(core)
@@ -224,10 +233,7 @@ def main(env_cfg, agent_cfg):
         completed_lengths: list[float] = []
         completed_returns: list[float] = []
         deaths = timeouts = 0
-        mse = smoothness = saturation = torque = energy = 0.0
-        torque_saturation = raw_task_reward = base_linear_speed = base_angular_speed = 0.0
-        amp_totals = {name: 0.0 for name in ("raw_style", "scaled_task", "scaled_style", "effective_reward")}
-        amp_steps = 0
+        metrics = MetricAccumulator()
         inference_elapsed = 0.0
         for _ in range(args_cli.eval_steps):
             flattened = history.push(frame(use_corruption))
@@ -239,29 +245,15 @@ def main(env_cfg, agent_cfg):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             inference_elapsed += time.perf_counter() - inference_started
-            mse += float(nn.functional.mse_loss(action, teacher))
-            smoothness += float((action - previous).square().mean())
-            saturation += float((action.abs() >= 0.99).float().mean())
-            previous = action
             observations, rewards, terminated, truncated, _ = env.step(action)
-            if hasattr(core.robot.data, "computed_torque"):
-                applied = core.robot.data.computed_torque
-                torque += float(applied.square().mean().sqrt())
-                energy += float((applied * core.robot.data.joint_vel).abs().mean() * core.step_dt)
-                limits = core.robot.data.joint_effort_limits.clamp_min(1.0e-6)
-                torque_saturation += float((applied.abs() >= limits).float().mean())
-            base_linear_speed += float(core.robot.data.body_lin_vel_w[:, core.ref_body_index].norm(dim=-1).mean())
-            base_angular_speed += float(core.robot.data.body_ang_vel_w[:, core.ref_body_index].norm(dim=-1).mean())
-            raw_task_reward += float(rewards.mean())
-            extras = getattr(core, "extras", {})
-            components = (
-                amp_reward_components(teacher_agent, extras.get("amp_obs"), rewards)
-                if extras.get("amp_obs") is not None else None
+            metrics.add(
+                step_metrics(
+                    core, adapter, teacher_agent,
+                    action=action, previous_action=previous, rewards=rewards,
+                    policy_action=action, teacher_action=teacher,
+                )
             )
-            if components is not None:
-                for name in amp_totals:
-                    amp_totals[name] += float(components[name].mean())
-                amp_steps += 1
+            previous = action
             lengths += 1
             returns += rewards.flatten()
             done = (terminated | truncated).flatten()
@@ -275,8 +267,8 @@ def main(env_cfg, agent_cfg):
                 corruptor.reset(ids)
                 lengths[done] = 0
                 returns[done] = 0
+                previous[done] = 0.0
         completed = deaths + timeouts
-        count = float(args_cli.eval_steps)
         return {
             "episode_length_mean": sum(completed_lengths) / len(completed_lengths) if completed_lengths else float(lengths.mean()),
             "return_mean": sum(completed_returns) / len(completed_returns) if completed_returns else float(returns.mean()),
@@ -284,16 +276,7 @@ def main(env_cfg, agent_cfg):
             "timeouts": timeouts,
             "death_rate": 100.0 * deaths / completed if completed else 0.0,
             "success_rate": 100.0 * timeouts / completed if completed else 0.0,
-            "teacher_action_mse": mse / count,
-            "action_smoothness": smoothness / count,
-            "action_saturation": saturation / count,
-            "torque_rms": torque / count,
-            "energy": energy / count,
-            "torque_saturation": torque_saturation / count,
-            "base_linear_speed": base_linear_speed / count,
-            "base_angular_speed": base_angular_speed / count,
-            "raw_task_reward": raw_task_reward / count,
-            **{f"amp_{name}": value / max(amp_steps, 1) for name, value in amp_totals.items()},
+            **metrics.mean(),
             "parameters": sum(parameter.numel() for parameter in student.parameters()),
             "inference_ms_per_sample": inference_elapsed * 1000.0 / (args_cli.eval_steps * args_cli.num_envs),
             "sensor_corruption_enabled": use_corruption and corruption_cfg.enabled,
@@ -364,11 +347,31 @@ def main(env_cfg, agent_cfg):
                     best_length = corrupted["episode_length_mean"]
                     best_iteration = iteration
                     best_metrics = row
+                    best_state = {name: value.detach().cpu().clone() for name, value in student.state_dict().items()}
                     save(iteration, "student_best_eval.pt")
                 force_skrl_isaaclab_reset(env)
                 observations, _ = env.reset()
                 history.reset()
                 corruptor.reset()
+        # Teacher-relative motion fidelity, measured once on the reported
+        # checkpoint. Deliberately after the loop: it rolls the env twice more
+        # and would otherwise perturb training's random stream.
+        if best_state is not None:
+            student.load_state_dict(best_state)
+        student.eval()
+
+        def student_policy(_observations: torch.Tensor) -> torch.Tensor:
+            flattened = history.push(frame(True))
+            return action_normalizer.denormalize(student(observation_normalizer.normalize(flattened)))
+
+        def reset_student_state() -> None:
+            history.reset()
+            corruptor.reset()
+
+        fidelity = evaluate_paired_motion_fidelity(
+            env, adapter, teacher_agent, student_policy,
+            seed=args_cli.seed, horizon=args_cli.mpjpe_horizon, on_reset=reset_student_state,
+        )
     finally:
         writer.close()
         env.close()
@@ -381,6 +384,7 @@ def main(env_cfg, agent_cfg):
         "metrics": {
             **best_metrics, "best_iteration": best_iteration,
             "total_gradient_steps": cumulative_gradient_steps, "learning_curve": learning_curve,
+            **fidelity,
         },
         "evaluations": evaluations,
         "method": args_cli.method,

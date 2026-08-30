@@ -38,6 +38,7 @@ ABLATION_SCRIPTS = {
     "architecture": ("run_architecture_ablation.py", "architecture"),
     "window": ("run_window_ablation.py", "window"),
     "joint_scope": ("run_joint_scope_ablation.py", "joint_scope"),
+    "dagger": ("run_dagger_ablation.py", "dagger"),
     "method_comparison": ("run_method_comparison.py", "method_comparison"),
 }
 

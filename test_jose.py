@@ -56,6 +56,9 @@ def _load_pipeline_module():
     adapters_stub.PolicyAdapter = object
     sys.modules[adapters_stub.__name__] = adapters_stub
     sys.modules[f"{estimator_package}.models"] = models
+    # metrics.py imports ..skrl_compat, so it has to be loaded inside the stub
+    # package rather than flat like the modules above.
+    _load_module(f"{estimator_package}.metrics", JOSE_DIR / "estimator" / "metrics.py")
     return _load_module(f"{estimator_package}.pipeline", JOSE_DIR / "estimator" / "pipeline.py")
 
 
@@ -420,12 +423,24 @@ def test_dagger_v2_checkpoint_round_trip(tmp_path):
     assert torch.allclose(student(sample), restored(sample))
 
 
+def test_dagger_rounds_are_distinguishable_and_existing_slugs_are_stable():
+    slugs = [experiment.slug for experiment in ablation_catalog.DAGGER_EXPERIMENTS]
+    assert len(set(slugs)) == len(slugs)
+    # The default-rounds arm keeps the bare slug, so results already in the
+    # catalog under that name stay addressable and keep grouping together.
+    assert ablation_catalog.AblationExperiment("LSTM", 25, "all").slug == "lstm_w25_all"
+    assert ablation_catalog.AblationExperiment("LSTM", 25, "all", 0).slug == "lstm_w25_all_r00"
+    for experiments in (ablation_catalog.ARCHITECTURE_EXPERIMENTS, ablation_catalog.JOINT_SCOPE_EXPERIMENTS):
+        assert all("_r" not in experiment.slug.rsplit("_", 1)[-1] for experiment in experiments)
+
+
 def test_jose_pipeline_entry_points():
     for name in (
         "train_state_estimator.py", "train_history_student.py", "train_imu_distillation.py",
         "train_joint_only_distillation.py", "play_teacher_with_estimator.py", "play_dagger.py",
         "play_history_student.py",
         "run_architecture_ablation.py", "run_window_ablation.py", "run_joint_scope_ablation.py",
+        "run_dagger_ablation.py",
         "run_method_comparison.py", "run_checkpoint_sweep.py", "ablation_catalog.py", "ablation_common.py",
     ):
         assert (JOSE_DIR / name).is_file()
@@ -849,15 +864,133 @@ def test_report_artifacts_and_failed_run(tmp_path):
     result = reporting.generate_report(raw, tmp_path / "report")
     assert result["runs"] == 3 and result["failures"] == 1
     assert result["required_files"] == list(reporting.REQUIRED_REPORT_FILES)
-    for name in ("summary.json", "summary.csv", "results_tidy.csv", "table.md", "table.tex", "report.md"):
+    for name in reporting.REQUIRED_REPORT_FILES:
         assert (tmp_path / "report" / name).is_file()
+    # The report directory is deliberately small: the five files above and below
+    # are the whole contract, and nothing else should reappear in it.
+    produced = {path.name for path in (tmp_path / "report").iterdir()}
+    assert not produced - set(reporting.REQUIRED_REPORT_FILES) - set(reporting.REQUIRED_PLOT_FILES)
+    assert not any(name.endswith(".pdf") or name.endswith(".csv") for name in produced)
     assert "synthetic failure" in (tmp_path / "report" / "report.md").read_text(encoding="utf-8")
     table = (tmp_path / "report" / "table.md").read_text(encoding="utf-8")
     assert "Episode steps" in table and "590.0 ± 14.1" in table
     assert "Death %" in table and "Timeout %" in table
     if result["plots"]:
-        for name in (
-            "episode_length_mean.png", "timeout_rate.png", "target_rmse_heatmap.png",
-            "dagger_learning_curve.png", "representative_trace.png",
-        ):
-            assert (tmp_path / "report" / name).is_file()
+        # The fixture's rows carry metrics.rounds but no metrics.learning_curve,
+        # so only the DAgger figure has data to draw.
+        assert (tmp_path / "report" / "dagger_learning_curve.png").is_file()
+        assert "learning_curves" in result["skipped_plots"]
+
+
+def test_paired_motion_fidelity_measures_divergence_and_restores_rng():
+    pipeline = _load_pipeline_module()
+
+    class FakeEnv:
+        """Two bodies that drift apart at a fixed rate per step, per policy."""
+
+        def __init__(self):
+            self.drift = 0.0
+            self.step_index = 0
+
+        def reset(self):
+            self.step_index = 0
+            return torch.zeros(2, 3), {}
+
+        def step(self, action):
+            self.step_index += 1
+            self.drift = float(action.mean())
+            return torch.zeros(2, 3), torch.zeros(2), torch.zeros(2, dtype=torch.bool), torch.zeros(2, dtype=torch.bool), {}
+
+    class FakeAdapter:
+        def __init__(self, env):
+            self.env = env
+
+        def body_positions(self):
+            # One body at the root, one offset by the drift the policy caused.
+            offset = self.env.drift * self.env.step_index
+            return torch.tensor([[[0.0, 0.0, 0.0], [offset, 0.0, 0.0]]]).repeat(2, 1, 1)
+
+        def root_position(self):
+            return torch.zeros(2, 3)
+
+        def body_names(self):
+            return ["root_link", "drifting_link"]
+
+        def action(self, agent, observations):
+            return torch.zeros(2, 1)
+
+    env = FakeEnv()
+    adapter = FakeAdapter(env)
+    pipeline.force_skrl_isaaclab_reset = lambda _env: None
+
+    torch.manual_seed(1234)
+    before = torch.rand(4)
+    torch.manual_seed(1234)
+
+    result = pipeline.evaluate_paired_motion_fidelity(
+        env, adapter, object(), lambda observations: torch.full((2, 1), 0.001), seed=7, horizon=10,
+    )
+
+    # The borrowed RNG stream must be handed back untouched, or a caller's next
+    # draw silently changes and every result after it diverges.
+    assert torch.allclose(torch.rand(4), before)
+
+    # Teacher holds still, student drifts 0.001 per step on one of two bodies,
+    # so the mean over both bodies at step t is 0.001*t/2 metres.
+    expected = sum(0.001 * step / 2 for step in range(10)) / 10 * 1000.0
+    assert result["mpjpe_g"] == pytest.approx(expected, rel=1e-6)
+    assert result["mpjpe_horizon"] == 10
+    assert result["root_position_error"] == pytest.approx(0.0)
+    assert set(result["mpjpe_per_body"]) == {"root_link", "drifting_link"}
+    assert result["mpjpe_per_body"]["root_link"] == pytest.approx(0.0)
+    assert len(result["mpjpe_by_step"]) == 10
+    assert result["mpjpe_by_step"][0]["mpjpe_g"] == pytest.approx(0.0)
+    assert result["mpjpe_by_step"][-1]["mpjpe_g"] > result["mpjpe_by_step"][1]["mpjpe_g"]
+    with pytest.raises(ValueError):
+        pipeline.evaluate_paired_motion_fidelity(
+            env, adapter, object(), lambda observations: torch.zeros(2, 1), seed=7, horizon=0,
+        )
+
+
+def test_step_metrics_are_computed_identically_for_every_caller():
+    package = "jose_pipeline_test_package"
+    metrics_module = sys.modules[f"{package}.estimator.metrics"]
+
+    class FakeData:
+        applied_torque = torch.full((2, 4), 2.0)
+        computed_torque = torch.full((2, 4), 99.0)
+        joint_vel = torch.full((2, 4), 3.0)
+        joint_effort_limits = torch.full((2, 4), 10.0)
+        body_lin_vel_w = torch.tensor([[[3.0, 4.0, 0.0]], [[3.0, 4.0, 0.0]]])
+        body_ang_vel_w = torch.tensor([[[0.0, 0.0, 2.0]], [[0.0, 0.0, 2.0]]])
+
+    class FakeCore:
+        robot = type("R", (), {"data": FakeData()})()
+        step_dt = 0.5
+        extras: dict = {}
+        ref_body_index = 0
+
+    core = FakeCore()
+    result = metrics_module.step_metrics(
+        core, object(), object(),
+        action=torch.zeros(2, 4), previous_action=torch.zeros(2, 4), rewards=torch.ones(2),
+        policy_action=torch.ones(2, 4), teacher_action=torch.zeros(2, 4),
+    )
+    # applied_torque wins over computed_torque: the post-clamp value is what the
+    # robot really used, and the two loops used to disagree about which to read.
+    assert result["torque_rms"] == pytest.approx(2.0)
+    # Energy sums power over joints before averaging over envs. Summing vs
+    # averaging here was a factor-of-29 discrepancy between the teacher's row
+    # and the students' in the comparison table.
+    assert result["energy"] == pytest.approx(2.0 * 3.0 * 4 * 0.5)
+    assert result["base_linear_speed"] == pytest.approx(5.0)
+    assert result["base_angular_speed"] == pytest.approx(2.0)
+    assert result["teacher_action_mse"] == pytest.approx(1.0)
+    assert result["torque_saturation"] == pytest.approx(0.0)
+    assert "amp_raw_style" not in result
+
+    accumulator = metrics_module.MetricAccumulator()
+    accumulator.add({"a": 1.0, "b": 10.0})
+    accumulator.add({"a": 3.0})
+    # Per-key counts: "b" appearing on one step of two must not be halved.
+    assert accumulator.mean() == {"a": 2.0, "b": 10.0}

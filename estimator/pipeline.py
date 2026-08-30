@@ -15,8 +15,9 @@ import numpy as np
 from torch import nn
 
 from ..schema import JOINT_PRESETS, SCHEMA_VERSION
-from ..skrl_compat import amp_reward_components, force_skrl_isaaclab_reset, require_skrl_2
+from ..skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 from .adapters import PolicyAdapter
+from .metrics import MetricAccumulator, step_metrics
 from .models import NormalizedEstimator, build_estimator
 
 
@@ -154,8 +155,7 @@ def collect_rollout(
     lengths = torch.zeros(observations.shape[0], device=observations.device)
     completed_returns: list[float] = []
     completed_lengths: list[float] = []
-    metric_totals: dict[str, float] = {}
-    metric_steps = 0
+    metrics = MetricAccumulator()
     previous_action = torch.zeros((observations.shape[0], adapter.schema.action_dim), device=observations.device)
 
     if estimator is not None:
@@ -190,40 +190,13 @@ def collect_rollout(
         observations, rewards, terminated, truncated, _ = env.step(action)
         returns += rewards.flatten()
         lengths += 1
-        core = adapter.core_env
-        torque = core.robot.data.applied_torque
-        joint_velocity = core.robot.data.joint_vel
-        effort_limit = core.robot.data.joint_effort_limits.clamp_min(1.0e-6)
-        metric_target = adapter.estimator_target()
-        target_names = adapter.schema.estimator_target_names
-        linear_ids = [target_names.index(f"base_lin_vel_{axis}") for axis in "xyz"]
-        angular_ids = [target_names.index(f"base_ang_vel_{axis}") for axis in "xyz"]
-        step_metrics = {
-            "action_smoothness": float((action - previous_action).square().mean()),
-            "torque_rms": float(torque.square().mean().sqrt()),
-            "energy": float((torque * joint_velocity).abs().sum(dim=-1).mean() * core.step_dt),
-            "action_saturation": float((action.abs() >= 0.999).float().mean()),
-            "torque_saturation": float((torque.abs() >= effort_limit).float().mean()),
-            "base_linear_speed": float(metric_target[:, linear_ids].norm(dim=-1).mean()),
-            "base_angular_speed": float(metric_target[:, angular_ids].norm(dim=-1).mean()),
-            "raw_task_reward": float(rewards.mean()),
-        }
-        if estimator_action is not None:
-            step_metrics["teacher_action_mse"] = float((estimator_action - teacher_action).square().mean())
-        extras = getattr(core, "extras", {})
-        amp_components = (
-            amp_reward_components(teacher_agent, extras.get("amp_obs"), rewards)
-            if extras.get("amp_obs") is not None
-            else None
+        metrics.add(
+            step_metrics(
+                adapter.core_env, adapter, teacher_agent,
+                action=action, previous_action=previous_action, rewards=rewards,
+                policy_action=estimator_action, teacher_action=teacher_action,
+            )
         )
-        if amp_components is not None:
-            for name in ("raw_style", "scaled_task", "scaled_style", "effective_reward"):
-                step_metrics[f"amp_{name}"] = float(amp_components[name].mean())
-            step_metrics["task_reward_scale"] = amp_components["task_reward_scale"]
-            step_metrics["style_reward_scale"] = amp_components["style_reward_scale"]
-        for name, value in step_metrics.items():
-            metric_totals[name] = metric_totals.get(name, 0.0) + value
-        metric_steps += 1
         previous_action = action
         done = (terminated | truncated).flatten()
         deaths += int(terminated.sum())
@@ -248,7 +221,7 @@ def collect_rollout(
         "episode_length_std": float(np.std(completed_lengths)) if completed_lengths else 0.0,
         "success_rate": 100.0 * timeouts / (deaths + timeouts) if deaths + timeouts else 0.0,
         "velocity_source": "sim_joint_velocity",
-        **{name: value / max(metric_steps, 1) for name, value in metric_totals.items()},
+        **metrics.mean(),
     }
     return dataset, stats
 
@@ -283,6 +256,12 @@ def evaluate_estimator_closed_loop(
     sample_count = 0
     estimator.eval()
     teacher_agent.enable_training_mode(False, apply_to_models=True)
+    # Same fidelity metrics every other method reports, so the estimator is not
+    # a row of blanks in the comparison table. Nothing added here draws from the
+    # RNG, which is what keeps the rollout -- and therefore every later DAgger
+    # round -- bit-identical to runs made before these metrics existed.
+    metrics = MetricAccumulator()
+    previous_action = torch.zeros((observations.shape[0], adapter.schema.action_dim), device=observations.device)
     max_steps = max_episode_steps * max(1, (episodes + observations.shape[0] - 1) // observations.shape[0] + 1)
     for _ in range(max_steps):
         frame = adapter.estimator_input()
@@ -293,9 +272,21 @@ def evaluate_estimator_closed_loop(
         squared_error += (estimate - target).double().square().sum(dim=0).cpu()
         sample_count += target.shape[0]
         action = adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
+        # The same teacher, driven by the true state instead of the estimate:
+        # the gap between the two is exactly this method's imitation error, and
+        # is the same quantity collect_rollout reports for the students.
+        teacher_action = adapter.action(teacher_agent, observations)
         observations, rewards, terminated, truncated, _ = env.step(action)
         returns += rewards.flatten()
         lengths += 1
+        metrics.add(
+            step_metrics(
+                adapter.core_env, adapter, teacher_agent,
+                action=action, previous_action=previous_action, rewards=rewards,
+                policy_action=action, teacher_action=teacher_action,
+            )
+        )
+        previous_action = action
         done = (terminated | truncated).flatten()
         if done.any():
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
@@ -308,6 +299,7 @@ def evaluate_estimator_closed_loop(
             returns[done_ids] = 0.0
             lengths[done_ids] = 0.0
             history.reset(done)
+            previous_action[done] = 0.0
             if len(completed_lengths) >= episodes:
                 break
     if not completed_lengths:
@@ -325,6 +317,98 @@ def evaluate_estimator_closed_loop(
         "success_rate": 100.0 * timeouts / len(completed_lengths),
         "rmse": float(target_rmse.square().mean().sqrt()),
         "target_rmse": target_rmse.tolist(),
+        **metrics.mean(),
+    }
+
+
+@torch.no_grad()
+def _record_body_trajectory(env, adapter, policy, *, seed: int, horizon: int, on_reset=None):
+    """Roll `policy` for `horizon` steps from a seeded reset, logging body positions."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    force_skrl_isaaclab_reset(env)
+    observations, _ = env.reset()
+    if on_reset is not None:
+        on_reset()
+    bodies, roots = [], []
+    for _ in range(horizon):
+        bodies.append(adapter.body_positions().clone())
+        roots.append(adapter.root_position().clone())
+        observations, _, _, _, _ = env.step(policy(observations))
+    return torch.stack(bodies), torch.stack(roots)
+
+
+def evaluate_paired_motion_fidelity(
+    env,
+    adapter: PolicyAdapter,
+    teacher_agent,
+    policy,
+    *,
+    seed: int,
+    horizon: int = 100,
+    on_reset=None,
+) -> dict:
+    """Teacher-relative MPJPE: how far the student's motion drifts from the teacher's.
+
+    Both policies are rolled from the same seeded reset, so step t of each
+    rollout starts from the same initial condition, and the per-body position
+    gap at step t is the motion difference the policies themselves caused.
+    Reported in millimetres, following PHC / ExBody2 / OmniH2O.
+
+    Two rollouts cannot share an env, so this runs them back to back. That
+    consumes RNG, which is why callers must invoke it *after* training rather
+    than between DAgger rounds -- the RNG state is saved and restored here so a
+    caller that ignores that still cannot perturb its own training stream.
+
+    Trajectories diverge chaotically once the policies differ at all, so
+    `horizon` is deliberately bounded and reported alongside the numbers: an
+    MPJPE without its horizon is meaningless.
+
+    `on_reset` is invoked after each env reset, for policies carrying state of
+    their own (a history buffer, a sensor corruptor) that must be cleared so the
+    second rollout really does start where the first one did.
+    """
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    torch_state = torch.get_rng_state()
+    numpy_state = np.random.get_state()
+    try:
+        teacher_bodies, teacher_roots = _record_body_trajectory(
+            env, adapter, lambda obs: adapter.action(teacher_agent, obs),
+            seed=seed, horizon=horizon, on_reset=on_reset,
+        )
+        student_bodies, student_roots = _record_body_trajectory(
+            env, adapter, policy, seed=seed, horizon=horizon, on_reset=on_reset,
+        )
+    finally:
+        torch.set_rng_state(torch_state)
+        np.random.set_state(numpy_state)
+
+    millimetres = 1000.0
+    global_error = (student_bodies - teacher_bodies).norm(dim=-1) * millimetres
+    local_error = (
+        (student_bodies - student_roots.unsqueeze(2)) - (teacher_bodies - teacher_roots.unsqueeze(2))
+    ).norm(dim=-1) * millimetres
+    root_error = (student_roots - teacher_roots).norm(dim=-1) * millimetres
+    return {
+        "mpjpe_g": float(global_error.mean()),
+        "mpjpe_l": float(local_error.mean()),
+        "root_position_error": float(root_error.mean()),
+        "mpjpe_horizon": horizon,
+        "mpjpe_per_body": {
+            name: float(global_error[:, :, index].mean())
+            for index, name in enumerate(adapter.body_names())
+        },
+        # Kept so the divergence curve can be plotted later without re-running.
+        "mpjpe_by_step": [
+            {
+                "step": step,
+                "mpjpe_g": float(global_error[step].mean()),
+                "mpjpe_l": float(local_error[step].mean()),
+                "root_position_error": float(root_error[step].mean()),
+            }
+            for step in range(horizon)
+        ],
     }
 
 

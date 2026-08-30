@@ -13,15 +13,29 @@ import sys
 import time
 
 try:
-    from .ablation_catalog import TASKS as CATALOG_TASK_REGISTRY, TeacherCatalog, write_json
+    from .ablation_catalog import (
+        TASKS as CATALOG_TASK_REGISTRY,
+        TASK_IMPLEMENTATION,
+        TRAINING_IMPLEMENTATION,
+        TeacherCatalog,
+        write_json,
+    )
     from .ablation_common import (
-        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint, run_live_subprocess,
+        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint,
+        implementation_fingerprint, run_live_subprocess,
     )
     from .reporting import generate_report
 except ImportError:
-    from ablation_catalog import TASKS as CATALOG_TASK_REGISTRY, TeacherCatalog, write_json
+    from ablation_catalog import (
+        TASKS as CATALOG_TASK_REGISTRY,
+        TASK_IMPLEMENTATION,
+        TRAINING_IMPLEMENTATION,
+        TeacherCatalog,
+        write_json,
+    )
     from ablation_common import (
-        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint, run_live_subprocess,
+        acquire_run_lock, content_identity, default_estimator_window, file_fingerprint,
+        implementation_fingerprint, run_live_subprocess,
     )
     from reporting import generate_report
 
@@ -37,7 +51,7 @@ METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation
 # Target number of student evaluation snapshots per run.
 LEARNING_CURVE_POINTS = 15
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 # Gym task id -> the ablation_catalog.TASKS key it corresponds to (used to
 # place this comparison's studies in the same per-task catalog layout).
 CATALOG_TASKS = {
@@ -251,8 +265,16 @@ def main() -> None:
         # see _estimator_gradient_steps for why this isn't a per-round multiply.
         args.student_train_steps = max(1, _estimator_gradient_steps(args) // args.student_iterations)
     fingerprints = {task: _fingerprint(checkpoint, args.dry_run) for task, checkpoint in cases}
+    # Every task in the comparison contributes its own env/config/motion files.
+    task_implementation = tuple(
+        dict.fromkeys(path for task_id, _ in cases for path in TASK_IMPLEMENTATION[CATALOG_TASKS[task_id]])
+    )
     signature_payload = {
         "version": FORMAT_VERSION,
+        # Without this the cache key is hyperparameters only, so editing the
+        # training code leaves every row marked complete and --resume silently
+        # mixes results from two different implementations into one study.
+        "implementation": implementation_fingerprint(TRAINING_IMPLEMENTATION + task_implementation),
         "cases": {task: content_identity(value) for task, value in fingerprints.items()},
         "seeds": args.seeds,
         "num_envs": args.num_envs, "collect_steps": args.collect_steps,

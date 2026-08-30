@@ -672,7 +672,7 @@ python -m jose.play_history_student \
 
 ## Ablation studies
 
-All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test. `--task` accepts `amp_walk`, `amp_dance`, `amp_jump`, or `ppo_walk` for `run_architecture_ablation.py`/`run_window_ablation.py`/`run_joint_scope_ablation.py` (default `amp_walk`); `run_method_comparison.py` only covers the three AMP tasks.
+All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test. `--task` accepts `amp_walk`, `amp_dance`, `amp_jump`, or `ppo_walk` for `run_architecture_ablation.py`/`run_window_ablation.py`/`run_joint_scope_ablation.py`/`run_dagger_ablation.py` (default `amp_walk`); `run_method_comparison.py` only covers the three AMP tasks.
 
 ### Compare estimator architectures
 
@@ -705,6 +705,26 @@ python -m jose.run_joint_scope_ablation \
   --task amp_walk \
   --headless
 ```
+
+### Measure what DAgger is worth
+
+JOSE trains in two phases: a supervised warm start on teacher-driven data, then
+on-policy DAgger rounds. This study varies only the number of DAgger rounds, so
+the `lstm_w25_all_r00` arm stops after the warm start and is the "no DAgger"
+baseline.
+
+```bash
+python -m jose.run_dagger_ablation \
+  --teacher-checkpoint "$TEACHER" \
+  --task amp_walk \
+  --headless
+```
+
+The 10-round arm keeps the plain `lstm_w25_all` slug, so it is reused from the
+catalog if another study already ran it -- only the 5- and 0-round arms actually
+train. Read the result from `dagger_learning_curve.png`: the middle panel is
+closed-loop episode length per round, which is what says whether the rounds
+helped. The top panel (validation MSE) does not track it.
 
 To run only one experiment, pass its canonical name:
 
@@ -744,12 +764,37 @@ Pass `--run-name <name>` to `run_method_comparison` when a stable,
 human-readable study name is preferred or when resuming that exact study.
 
 Completed jobs are reused when you restart the same named study. Architecture,
-window, joint-scope, and method comparisons all write the same report bundle
-under their run's `report/` directory: JSON and CSV results, Markdown and LaTeX
-tables, and PNG and PDF plots. For estimator ablations, check
+window, joint-scope, DAgger, and method comparisons all write the same report
+bundle under their run's `report/` directory: `summary.json`, `table.md`,
+`report.md`, and two PNG figures. Per-run raw values stay in `results.jsonl`
+next to it. For estimator ablations, check
 `intermediate_results.json` while a catalog study is running; every completed
 `jobs[]` entry exposes its mean episode length directly as `eplen`, matching the
 final `manifest.json`.
+
+### Motion-fidelity metrics
+
+Once every method reaches the performance ceiling, `return_mean` and
+`episode_length_mean` stop separating them and fidelity metrics do the work.
+Every method reports these, computed by one shared implementation
+(`estimator/metrics.py`) so the columns mean the same thing across rows:
+
+| Metric | What it says |
+|---|---|
+| `mpjpe_g`, `mpjpe_l` | Mean per-body position error against the teacher, global and root-relative, in mm |
+| `root_position_error` | Root drift from the teacher's trajectory, in mm |
+| `teacher_action_mse` | Action-level imitation error. For JOSE this is the same teacher policy driven by the estimate instead of the true state |
+| `amp_raw_style` | The AMP discriminator's own score for how reference-like the motion is |
+| `action_smoothness`, `torque_rms`, `energy` | Jitter and effort, the `E_acc` analogues |
+
+MPJPE rolls the teacher and the student separately from the *same* seeded
+reset and compares body positions frame by frame, so `--mpjpe-horizon` (default
+100 steps) is part of the measurement: the two trajectories diverge chaotically
+once the policies differ, and a number without its horizon is meaningless.
+`PrivilegedTeacher` rows carry the teacher measured against itself — the
+determinism floor, which reads 0.000 mm and is what makes every other row
+interpretable. `mpjpe_per_body` and `mpjpe_by_step` are kept in `results.jsonl`
+for plotting the divergence curve later without re-running anything.
 
 ### Catalog layout
 
@@ -758,7 +803,7 @@ Each study run directory (`studies/<study>/<date>/`) contains:
 - `manifest.json` — study identity (teacher, task, config) and per-job status; `status` becomes `"complete"` once every job has a result.
 - `intermediate_results.json` — the same information plus every currently-available result row and its aggregated `summary`; safe to read while the study is still running.
 - `results.jsonl` — one JSON object per completed job, written once the study finishes; this is what `generate_report.py`/`reporting.aggregate()` consume.
-- `report/` — `summary.json`, `summary.csv`, `results_tidy.csv`, `table.md`, `table.tex`, `report.md`, and (if matplotlib is installed) PNG/PDF plots.
+- `report/` — `summary.json` (every aggregated metric), `table.md`, `report.md`, and, if matplotlib is installed, `dagger_learning_curve.png` and `learning_curves.png`. Both figures are mean ± std bands across seeds. Anything you want to plot yourself comes from `results.jsonl`, which is unfiltered.
 
 Below the study directories, `catalog/` holds the content-addressed jobs and
 datasets themselves (keyed by a digest of the job's full configuration), which
@@ -784,7 +829,8 @@ that reason is reported in `report.md` instead of raising an error.
 ### Sweeping across checkpoints
 
 `run_architecture_ablation.py`, `run_window_ablation.py`,
-`run_joint_scope_ablation.py`, and `run_method_comparison.py` each take one
+`run_joint_scope_ablation.py`, `run_dagger_ablation.py`, and
+`run_method_comparison.py` each take one
 teacher checkpoint per invocation. `run_checkpoint_sweep.py` repeats one of
 them across every checkpoint in a training run (e.g. `agent_10000.pt` ..
 `agent_100000.pt`, plus `best_agent.pt`) and merges the resulting
@@ -984,7 +1030,8 @@ python -m jose.motions.motion_replayer --help
 ├── reporting.py                           # Aggregation, tables, and plots for ablation studies
 ├── generate_report.py                     # Regenerate a report from an existing results.jsonl
 ├── run_architecture_ablation.py, run_window_ablation.py,
-│   run_joint_scope_ablation.py            # Estimator architecture/window/joint-scope studies
+│   run_joint_scope_ablation.py,
+│   run_dagger_ablation.py                 # Estimator architecture/window/joint-scope/DAgger studies
 ├── run_method_comparison.py               # Four-way Teacher/IMU/Joint-only/JOSE comparison
 └── run_checkpoint_sweep.py                # Repeat any of the above across many checkpoints
 ```

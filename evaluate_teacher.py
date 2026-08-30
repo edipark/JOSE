@@ -19,6 +19,10 @@ parser.add_argument("--num-envs", type=int, default=256)
 parser.add_argument("--collect-steps", type=int, default=2000)
 parser.add_argument("--epochs", type=int, default=0, help="Accepted for ablation command compatibility")
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument(
+    "--mpjpe-horizon", type=int, default=100,
+    help="Steps of teacher-paired rollout used for the MPJPE motion-fidelity metrics.",
+)
 parser.add_argument("--output-dir", default="logs/jose_g1/teacher")
 parser.add_argument("--run-name", default=None)
 parser.add_argument(
@@ -45,7 +49,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
 from jose.estimator.adapters import make_policy_adapter
-from jose.estimator.pipeline import collect_rollout
+from jose.estimator.pipeline import collect_rollout, evaluate_paired_motion_fidelity
 from jose.skrl_compat import disable_velocity_termination_for_evaluation
 from jose.teacher_setup import build_env_and_teacher, teacher_policy_module
 
@@ -98,6 +102,18 @@ def main(env_cfg, agent_cfg):
             torch.cuda.synchronize(device)
     metrics["inference_ms_per_sample"] = (
         (time.perf_counter() - started) * 1000.0 / (benchmark_steps * observations.shape[0])
+    )
+    # The teacher measured against itself. This is the control for every other
+    # method's MPJPE: it is the floor that identical policies from identical
+    # seeds still produce, so it says how much of a student's number is real
+    # imitation error rather than the simulator diverging on its own. If this is
+    # not ~0, no other MPJPE in the study means anything.
+    metrics.update(
+        evaluate_paired_motion_fidelity(
+            env, adapter, teacher_agent,
+            lambda obs: adapter.action(teacher_agent, obs),
+            seed=args_cli.seed, horizon=args_cli.mpjpe_horizon,
+        )
     )
     default_name = (
         f"{args_cli.task}_TeacherGT_seed{args_cli.seed}_"

@@ -75,3 +75,20 @@ def default_estimator_window(task_id: str) -> int:
     as an import-time side effect and cannot be imported just for this constant.
     """
     return 25 if task_id == "Isaac-G1-AMP-Walk-JOSE-Direct-v0" else 50
+
+
+def implementation_fingerprint(paths: tuple[str, ...]) -> str:
+    """SHA-256 over the raw bytes of the source files that define a job's behaviour.
+
+    The path name is mixed in alongside the bytes so that reordering or renaming
+    the list is itself a change. Hashing bytes rather than an AST means a
+    comment-only edit invalidates cached results too -- deliberately
+    conservative: a stale result silently reused is far more expensive than a
+    re-run.
+    """
+    digest = hashlib.sha256()
+    root = Path(__file__).parent
+    for relative in paths:
+        digest.update(relative.encode("utf-8"))
+        digest.update((root / relative).read_bytes())
+    return digest.hexdigest()

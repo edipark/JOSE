@@ -42,6 +42,11 @@ parser.add_argument("--epochs", type=int, default=50)
 parser.add_argument("--dagger_epochs", "--dagger-epochs", dest="dagger_epochs", type=int, default=10, help="Epochs for each DAgger refit")
 parser.add_argument("--batch_size", "--batch-size", dest="batch_size", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=1.0e-3)
+parser.add_argument(
+    "--mpjpe-horizon", type=int, default=100,
+    help="Steps of teacher-paired rollout used for the MPJPE motion-fidelity metrics. "
+    "Bounded because the two trajectories diverge chaotically once the policies differ.",
+)
 parser.add_argument("--dagger_rounds", "--dagger-rounds", dest="dagger_rounds", type=int, default=10)
 parser.add_argument("--dagger_est_ratio", "--dagger-est-ratio", dest="dagger_est_ratio", type=float, default=0.8)
 parser.add_argument("--dagger_est_ratio_final", "--dagger-est-ratio-final", dest="dagger_est_ratio_final", type=float, default=1.0)
@@ -88,6 +93,7 @@ from jose.estimator.pipeline import (
     RolloutDataset,
     collect_rollout,
     evaluate_estimator_closed_loop,
+    evaluate_paired_motion_fidelity,
     evaluate_predictions,
     save_jose_checkpoint,
     train_estimator,
@@ -493,6 +499,28 @@ def main(env_cfg, agent_cfg):
     metrics["learning_curve"] = [
         {"step": row["cumulative_gradient_steps"], **row["evaluation"]} for row in rounds
     ]
+    # Teacher-relative motion fidelity, on the reported checkpoint. Runs last of
+    # everything because it rolls the env twice more; it restores the RNG state
+    # it borrows, but keeping it after every other measurement means it cannot
+    # perturb any of them even if that guarantee ever weakens.
+    fidelity_history = HistoryBuffer(
+        benchmark_observations.shape[0], window, adapter.input_dim, benchmark_observations.device
+    )
+
+    def estimator_policy(observations: torch.Tensor) -> torch.Tensor:
+        frame = adapter.estimator_input()
+        sequence = fidelity_history.push(frame)
+        model_input = frame if args_cli.estimator.upper() == "MLP" else sequence
+        return adapter.action(teacher_agent, adapter.inject_estimate(observations, estimator.predict(model_input)))
+
+    metrics.update(
+        evaluate_paired_motion_fidelity(
+            env, adapter, teacher_agent, estimator_policy,
+            seed=args_cli.seed + args_cli.eval_seed_offset,
+            horizon=args_cli.mpjpe_horizon,
+            on_reset=lambda: fidelity_history.values.zero_(),
+        )
+    )
     metrics["wall_time_s"] = time.monotonic() - started
     save_jose_checkpoint(output / "best_estimator.pt", estimator, adapter, args_cli.task, window, metrics)
     (output / "training.json").write_text(

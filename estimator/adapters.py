@@ -9,6 +9,7 @@ import torch
 
 from ..schema import (
     AMP_OBSERVATION_SCHEMA,
+    G1_KEY_BODY_NAMES,
     PPO_WALK_OBSERVATION_SCHEMA,
     ObservationSchema,
     joint_indices,
@@ -66,6 +67,30 @@ class PolicyAdapter(ABC):
         if estimate.shape[-1] != self.schema.estimator_target_dim:
             raise ValueError("Estimator output does not match the policy schema")
         return inject_observation_estimate(observations, estimate, self.schema.estimator_target_indices)
+
+    def tracked_body_ids(self) -> list[int]:
+        """Indices of the bodies whose positions MPJPE is measured over.
+
+        Prefers the 10 AMP key bodies so the numbers line up with the key-body
+        convention the rest of the pipeline already uses; falls back to every
+        body for envs that define no key bodies (ppo_walk).
+        """
+        names = list(self.core_env.robot.data.body_names)
+        tracked = [names.index(name) for name in G1_KEY_BODY_NAMES if name in names]
+        return tracked or list(range(len(names)))
+
+    def body_names(self) -> list[str]:
+        names = list(self.core_env.robot.data.body_names)
+        return [names[index] for index in self.tracked_body_ids()]
+
+    def body_positions(self) -> torch.Tensor:
+        """World positions of the tracked bodies, (num_envs, num_tracked, 3)."""
+        ids = torch.as_tensor(self.tracked_body_ids(), device=self.core_env.robot.data.body_pos_w.device)
+        return self.core_env.robot.data.body_pos_w.index_select(1, ids)
+
+    def root_position(self) -> torch.Tensor:
+        """World position of the root body, (num_envs, 3)."""
+        return self.core_env.robot.data.root_pos_w
 
     @abstractmethod
     def name(self) -> str:

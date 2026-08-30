@@ -19,17 +19,27 @@ from typing import Iterable
 CATALOG_FORMAT_VERSION = 1
 
 
+# Rounds every study but the DAgger ablation uses; also the slug's implicit value.
+DEFAULT_DAGGER_ROUNDS = 10
+
+
 @dataclass(frozen=True)
 class AblationExperiment:
     estimator: str
     window: int
     joint_preset: str
-    dagger_rounds: int = 10
+    dagger_rounds: int = DEFAULT_DAGGER_ROUNDS
 
     @property
     def slug(self) -> str:
         model = self.estimator.lower()
-        return f"{model}_w{self.window:02d}_{self.joint_preset}"
+        slug = f"{model}_w{self.window:02d}_{self.joint_preset}"
+        # Only non-default round counts are spelled out, so every slug that
+        # existed before the DAgger ablation keeps its name -- results already
+        # in the catalog stay addressable and reports still group them together.
+        # Without the suffix, rounds=0 and rounds=10 would share a slug and be
+        # averaged into one row despite being different experiments.
+        return slug if self.dagger_rounds == DEFAULT_DAGGER_ROUNDS else f"{slug}_r{self.dagger_rounds:02d}"
 
     def to_runner_tuple(self) -> tuple[str, str, int, str, int]:
         return self.slug, self.estimator, self.window, self.joint_preset, self.dagger_rounds
@@ -45,6 +55,14 @@ JOINT_SCOPE_EXPERIMENTS = (
     AblationExperiment("LSTM", 25, "all"),
     AblationExperiment("LSTM", 25, "legs"),
     AblationExperiment("LSTM", 25, "upper"),
+)
+# How much the on-policy DAgger phase is worth over the supervised warm start
+# alone. rounds=0 stops after the warm start, so its metrics.rounds holds just
+# the round-0 record -- that arm is the "no DAgger" baseline.
+DAGGER_EXPERIMENTS = (
+    AblationExperiment("LSTM", 25, "all", 10),
+    AblationExperiment("LSTM", 25, "all", 5),
+    AblationExperiment("LSTM", 25, "all", 0),
 )
 
 # Task registry shared by every ablation/comparison entry point: task key ->
