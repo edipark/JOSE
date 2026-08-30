@@ -34,6 +34,9 @@ TASKS = {
     "jump": CATALOG_TASK_REGISTRY["amp_jump"][0],
 }
 METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE")
+# Target number of student evaluation snapshots per run.
+LEARNING_CURVE_POINTS = 15
+
 FORMAT_VERSION = 3
 # Gym task id -> the ablation_catalog.TASKS key it corresponds to (used to
 # place this comparison's studies in the same per-task catalog layout).
@@ -183,6 +186,10 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         "--num-envs", str(args.num_envs), "--num-iterations", str(args.student_iterations),
         "--rollout-steps", str(args.student_rollout_steps), "--train-steps", str(args.student_train_steps),
         "--window", str(window),
+        # Keep the learning curve at a readable resolution however many
+        # iterations the env-sample budget works out to, instead of letting the
+        # fixed default thin it to a handful of points on short runs.
+        "--eval-interval", str(max(1, args.student_iterations // LEARNING_CURVE_POINTS)),
     ]
     if args.eval_steps is not None:
         # Otherwise train_history_student.py falls back to its own per-task default.
