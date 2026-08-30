@@ -84,6 +84,7 @@ TRAINING_IMPLEMENTATION = (
     "train_state_estimator.py",
     "estimator/pipeline.py",
     "estimator/adapters.py",
+    "estimator/metrics.py",
     "estimator/models.py",
     "schema.py",
     "skrl_compat.py",

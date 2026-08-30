@@ -994,3 +994,24 @@ def test_step_metrics_are_computed_identically_for_every_caller():
     accumulator.add({"a": 3.0})
     # Per-key counts: "b" appearing on one step of two must not be halved.
     assert accumulator.mean() == {"a": 2.0, "b": 10.0}
+
+
+def test_frozen_rng_keeps_metric_work_out_of_the_random_stream():
+    pipeline = _load_pipeline_module()
+
+    def draw():
+        return torch.rand(3).tolist()
+
+    torch.manual_seed(99)
+    expected = [draw(), draw()]
+
+    torch.manual_seed(99)
+    first = draw()
+    # Stands in for skrl's policy act(), which rsamples on every call and throws
+    # the sample away when the caller asks for the mean -- an extra evaluation
+    # done purely to measure something must not move the stream.
+    with pipeline.frozen_rng():
+        torch.rand(64)
+        torch.randn(128)
+    second = draw()
+    assert [first, second] == expected

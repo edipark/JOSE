@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import json
 import os
 import time
@@ -19,6 +20,27 @@ from ..skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 from .adapters import PolicyAdapter
 from .metrics import MetricAccumulator, step_metrics
 from .models import NormalizedEstimator, build_estimator
+
+
+@contextmanager
+def frozen_rng():
+    """Run a block without advancing the random stream.
+
+    skrl's Gaussian policy samples from its distribution on every ``act()`` call
+    and discards the sample when the caller wants the mean, so evaluating the
+    policy one extra time purely to *measure* something would still shift every
+    later draw -- changing the very trajectory being measured, and every DAgger
+    round after it. Metric-only work goes inside this so adding a metric can
+    never alter a result.
+    """
+    cpu_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        yield
+    finally:
+        torch.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 
 
 @dataclass
@@ -257,9 +279,9 @@ def evaluate_estimator_closed_loop(
     estimator.eval()
     teacher_agent.enable_training_mode(False, apply_to_models=True)
     # Same fidelity metrics every other method reports, so the estimator is not
-    # a row of blanks in the comparison table. Nothing added here draws from the
-    # RNG, which is what keeps the rollout -- and therefore every later DAgger
-    # round -- bit-identical to runs made before these metrics existed.
+    # a row of blanks in the comparison table. Every added call sits inside
+    # frozen_rng(), which is what keeps the rollout -- and therefore every later
+    # DAgger round -- bit-identical to runs made before these metrics existed.
     metrics = MetricAccumulator()
     previous_action = torch.zeros((observations.shape[0], adapter.schema.action_dim), device=observations.device)
     max_steps = max_episode_steps * max(1, (episodes + observations.shape[0] - 1) // observations.shape[0] + 1)
@@ -272,20 +294,23 @@ def evaluate_estimator_closed_loop(
         squared_error += (estimate - target).double().square().sum(dim=0).cpu()
         sample_count += target.shape[0]
         action = adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
-        # The same teacher, driven by the true state instead of the estimate:
-        # the gap between the two is exactly this method's imitation error, and
-        # is the same quantity collect_rollout reports for the students.
-        teacher_action = adapter.action(teacher_agent, observations)
+        driving_observations = observations
         observations, rewards, terminated, truncated, _ = env.step(action)
         returns += rewards.flatten()
         lengths += 1
-        metrics.add(
-            step_metrics(
-                adapter.core_env, adapter, teacher_agent,
-                action=action, previous_action=previous_action, rewards=rewards,
-                policy_action=action, teacher_action=teacher_action,
+        with frozen_rng():
+            # The same teacher, driven by the true state instead of the
+            # estimate: the gap between the two is exactly this method's
+            # imitation error, and is the quantity collect_rollout already
+            # reports for the students.
+            teacher_action = adapter.action(teacher_agent, driving_observations)
+            metrics.add(
+                step_metrics(
+                    adapter.core_env, adapter, teacher_agent,
+                    action=action, previous_action=previous_action, rewards=rewards,
+                    policy_action=action, teacher_action=teacher_action,
+                )
             )
-        )
         previous_action = action
         done = (terminated | truncated).flatten()
         if done.any():
