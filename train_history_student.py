@@ -29,7 +29,11 @@ parser.add_argument("--train-steps", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=1.0e-4)
 parser.add_argument("--weight-decay", type=float, default=1.0e-4)
-parser.add_argument("--buffer-capacity", type=int, default=200_000)
+parser.add_argument(
+    "--buffer-capacity", type=int, default=250_000,
+    help="DAgger dataset cap. Matches train_state_estimator.py --max-dataset-size so the "
+    "estimator and the distillation students train on equally sized datasets.",
+)
 parser.add_argument("--eval-interval", type=int, default=20)
 parser.add_argument(
     "--eval-steps", type=int, default=None,

@@ -67,7 +67,16 @@ class RunningNormalizer:
 
 
 class ReplayBuffer:
-    """Fixed-capacity device-local ring buffer for DAgger pairs."""
+    """Fixed-capacity device-local DAgger dataset with reservoir eviction.
+
+    Deliberately mirrors estimator/pipeline.py:RolloutDataset.append rather than
+    being a ring buffer: on overflow the retained set is a uniform random sample
+    of the *whole* old+new pool, so every round the student has ever collected
+    keeps a shrinking-but-nonzero share instead of being dropped wholesale once
+    it falls out of a recency window. The two are compared against each other in
+    the method comparison, so the retention policy has to be the same on both
+    sides or "effective dataset" means something different per method.
+    """
 
     def __init__(self, capacity: int, observation_dim: int, action_dim: int, device: torch.device | str):
         if capacity <= 0:
@@ -75,25 +84,34 @@ class ReplayBuffer:
         self.capacity = capacity
         self.observations = torch.empty((capacity, observation_dim), device=device)
         self.actions = torch.empty((capacity, action_dim), device=device)
-        self.write_index = 0
         self.size = 0
 
     def add(self, observations: torch.Tensor, actions: torch.Tensor) -> None:
         if observations.shape[0] != actions.shape[0]:
             raise ValueError("Replay observations and actions must have the same batch size")
-        if observations.shape[0] >= self.capacity:
-            observations = observations[-self.capacity :]
-            actions = actions[-self.capacity :]
         count = observations.shape[0]
-        first = min(count, self.capacity - self.write_index)
-        self.observations[self.write_index : self.write_index + first] = observations[:first]
-        self.actions[self.write_index : self.write_index + first] = actions[:first]
-        remaining = count - first
-        if remaining:
-            self.observations[:remaining] = observations[first:]
-            self.actions[:remaining] = actions[first:]
-        self.write_index = (self.write_index + count) % self.capacity
-        self.size = min(self.capacity, self.size + count)
+        if count == 0:
+            return
+        device = self.observations.device
+        total = self.size + count
+        if total <= self.capacity:
+            self.observations[self.size : total] = observations
+            self.actions[self.size : total] = actions
+            self.size = total
+            return
+
+        # Draw the survivors over the concatenated [old | new] pool without ever
+        # materialising it: indices below self.size name entries already in
+        # place, so they are simply left alone, and the slots they vacate are
+        # exactly the room the selected new samples need.
+        selected = torch.randperm(total, device=device)[: self.capacity]
+        taken = selected[selected >= self.size] - self.size
+        kept = torch.ones(self.size, dtype=torch.bool, device=device)
+        kept[selected[selected < self.size]] = False
+        free = torch.cat((kept.nonzero(as_tuple=True)[0], torch.arange(self.size, self.capacity, device=device)))
+        self.observations[free] = observations[taken]
+        self.actions[free] = actions[taken]
+        self.size = self.capacity
 
     def sample(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
         if self.size == 0:

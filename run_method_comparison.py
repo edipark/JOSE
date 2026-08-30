@@ -198,7 +198,14 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         ]
     elif method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
-        command = [sys.executable, str(root / script), *common_student, "--log-dir", str(output)]
+        command = [
+            sys.executable, str(root / script), *common_student,
+            # Same dataset cap as the estimator, and the same reservoir eviction
+            # behind it (estimator/models.py:ReplayBuffer), so "how much data the
+            # method gets to learn from" isn't a confound either.
+            "--buffer-capacity", str(args.estimator_max_dataset_size),
+            "--log-dir", str(output),
+        ]
     else:
         command = [
             sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
@@ -245,6 +252,7 @@ def main() -> None:
         "estimator_epochs": args.estimator_epochs, "estimator_dagger_rounds": args.estimator_dagger_rounds,
         "estimator_dagger_epochs": args.estimator_dagger_epochs,
         "estimator_max_dataset_size": args.estimator_max_dataset_size,
+        "student_buffer_capacity": args.estimator_max_dataset_size,
         "student_iterations": args.student_iterations, "student_rollout_steps": args.student_rollout_steps,
         "student_train_steps": args.student_train_steps, "eval_steps": args.eval_steps,
     }
