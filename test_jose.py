@@ -34,6 +34,7 @@ compat = _load_module("jose_g1_compat_test", JOSE_DIR / "skrl_compat.py")
 models = _load_module("jose_g1_models_test", JOSE_DIR / "estimator" / "models.py")
 reporting = _load_module("jose_g1_reporting_test", JOSE_DIR / "reporting.py")
 ablation_catalog = _load_module("jose_g1_ablation_catalog_test", JOSE_DIR / "ablation_catalog.py")
+ablation_common = _load_module("jose_g1_ablation_common_test", JOSE_DIR / "ablation_common.py")
 task_math = _load_module("jose_g1_task_math_test", JOSE_DIR / "task_math.py")
 motion_loader = _load_module("jose_g1_motion_loader_test", JOSE_DIR / "motions" / "motion_loader.py")
 imu = _load_module("jose_g1_imu_test", JOSE_DIR / "distillation" / "imu.py")
@@ -520,7 +521,7 @@ def test_jose_pipeline_entry_points():
         "play_history_student.py",
         "run_architecture_ablation.py", "run_window_ablation.py", "run_joint_scope_ablation.py",
         "run_dagger_ablation.py",
-        "run_method_comparison.py", "run_checkpoint_sweep.py", "ablation_catalog.py", "ablation_common.py",
+        "run_method_comparison.py", "run_all_ablation.py", "ablation_catalog.py", "ablation_common.py",
     ):
         assert (JOSE_DIR / name).is_file()
 
@@ -687,7 +688,8 @@ def test_method_comparison_accepts_one_to_three_cases(tmp_path):
     assert "/amp_walk/" in result.stdout
     assert "/methods/jose/window_25/joints_all/seed_7" in result.stdout
     assert "/amp_jump/" in result.stdout
-    assert "/methods/jose/window_50/joints_all/seed_7" in result.stdout
+    assert "/methods/jose/window_25/joints_all/seed_7" in result.stdout
+    assert "/methods/jose/window_50/" not in result.stdout
     walk_jose = next(
         line for line in result.stdout.splitlines()
         if "train_state_estimator.py" in line and "Isaac-G1-AMP-Walk" in line
@@ -702,11 +704,13 @@ def test_method_comparison_accepts_one_to_three_cases(tmp_path):
     assert failure.returncode != 0
 
 
-def test_amp_walk_default_estimator_is_lstm_w25_all():
+def test_default_estimator_is_lstm_w25_all_for_every_task():
     training_source = (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
     assert 'default="LSTM"' in training_source
     assert 'default="all"' in training_source
-    assert 'args_cli.window = 25 if args_cli.task == "Isaac-G1-AMP-Walk-JOSE-Direct-v0" else 50' in training_source
+    assert '"--window", type=int, default=25' in training_source
+    for task_id, _, _ in ablation_catalog.TASKS.values():
+        assert ablation_common.default_estimator_window(task_id) == 25
 
 
 def test_rollout_diagnostics_npz_and_plot(tmp_path):
@@ -1094,3 +1098,45 @@ def test_frozen_rng_keeps_metric_work_out_of_the_random_stream():
         torch.randn(128)
     second = draw()
     assert [first, second] == expected
+
+
+def test_checkpoint_sweep_seed_translation_and_checkpoint_resolution(tmp_path):
+    sweep = _load_module("jose_g1_checkpoint_sweep_test", JOSE_DIR / "run_all_ablation.py")
+
+    # method_comparison passes any seed set straight through.
+    assert sweep._seed_args("method_comparison", [42, 44, 50]) == ["--seeds", "42", "44", "50"]
+    assert sweep._seed_args("architecture", None) == []
+
+    # The other four studies only accept a contiguous range.
+    assert sweep._seed_args("architecture", [42, 43, 44]) == ["--seed-start", "42", "--seeds", "3"]
+    assert sweep._seed_args("dagger", [5]) == ["--seed-start", "5", "--seeds", "1"]
+    with pytest.raises(ValueError):
+        sweep._seed_args("window", [42, 44])
+
+    checkpoint = tmp_path / "best_agent.pt"
+    checkpoint.write_bytes(b"stub")
+    other = tmp_path / "sub" / ".." / "best_agent.pt"
+    # Same path reached two ways collapses to one resolved checkpoint.
+    assert sweep.resolve_checkpoints([str(checkpoint), str(other)]) == [checkpoint.resolve()]
+    with pytest.raises(ValueError):
+        sweep.resolve_checkpoints([])
+
+
+def test_run_all_ablation_builds_translated_task_and_headless_flags(tmp_path):
+    sweep = _load_module("jose_g1_run_all_ablation_build_test", JOSE_DIR / "run_all_ablation.py")
+    args = sweep._parser().parse_args([
+        "--checkpoints", "ckpt.pt", "--task", "locomotion", "--seeds", "7", "--no-headless",
+    ])
+    checkpoint = Path("ckpt.pt")
+
+    architecture_command = sweep.build_command("architecture", args, checkpoint)
+    assert "--task" in architecture_command and "locomotion" in architecture_command
+    assert architecture_command[-1] == "--no-headless"
+    assert "--seed-start" in architecture_command
+
+    # run_method_comparison.py's own vocabulary, not ablation_catalog.py's.
+    comparison_command = sweep.build_command("method_comparison", args, checkpoint)
+    assert "--case" in comparison_command
+    case_index = comparison_command.index("--case")
+    assert comparison_command[case_index + 1 : case_index + 3] == ["locomotion", "ckpt.pt"]
+    assert "--seeds" in comparison_command and "7" in comparison_command

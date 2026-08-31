@@ -30,8 +30,8 @@ parser.add_argument("--adapter", choices=("amp", "ppo_walk"), default="amp")
 parser.add_argument("--joint_preset", "--joint-preset", dest="joint_preset", choices=("all", "legs", "upper"), default="all")
 parser.add_argument("--est_type", "--estimator", dest="estimator", choices=("LSTM", "TCN", "MLP", "HISTORY_MLP"), default="LSTM")
 parser.add_argument(
-    "--window", type=int, default=None,
-    help="History window (default: 25 for AMP Walk, 50 for other tasks)",
+    "--window", type=int, default=25,
+    help="History window (default: 25 for every task)",
 )
 parser.add_argument("--hidden_size", "--hidden-size", dest="hidden_size", type=int, default=256)
 parser.add_argument("--num_layers", "--num-layers", dest="num_layers", type=int, default=2)
@@ -75,8 +75,6 @@ parser.add_argument("--output_dir", "--output-dir", dest="output_dir", default="
 parser.add_argument("--run-name", default=None, help="Explicit output subdirectory name")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
-if args_cli.window is None:
-    args_cli.window = 25 if args_cli.task == "Isaac-G1-AMP-Walk-JOSE-Direct-v0" else 50
 
 from jose.teacher_setup import resolve_agent_entry_point  # noqa: E402
 
