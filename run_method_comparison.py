@@ -40,12 +40,19 @@ except ImportError:
     from reporting import generate_report
 
 
-# This comparison only ever ran the AMP tasks; ppo_walk is deliberately not
-# included here (see README's method-comparison section for why).
 TASKS = {
     "walk": CATALOG_TASK_REGISTRY["amp_walk"][0],
     "dance": CATALOG_TASK_REGISTRY["amp_dance"][0],
     "jump": CATALOG_TASK_REGISTRY["amp_jump"][0],
+    "locomotion": CATALOG_TASK_REGISTRY["locomotion"][0],
+}
+# Gym task id -> (estimator adapter kind, agent config entry point), so the
+# teacher/estimator/student commands below stay correct for a non-AMP task
+# instead of the "amp" adapter being silently assumed everywhere.
+TASK_ADAPTERS = {
+    task_id: (adapter, agent)
+    for task_id, adapter, agent in CATALOG_TASK_REGISTRY.values()
+    if task_id in TASKS.values()
 }
 METHODS = ("PrivilegedTeacher", "IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE")
 # Target number of student evaluation snapshots per run.
@@ -74,7 +81,9 @@ def parse_cases(values: list[list[str]]) -> tuple[tuple[str, str], ...]:
         key = task.lower()
         task_id = TASKS.get(key, task)
         if task_id not in TASKS.values():
-            raise ValueError(f"Unsupported task {task!r}; use walk, dance, jump, or a matching JOSE task id")
+            raise ValueError(
+                f"Unsupported task {task!r}; use walk, dance, jump, locomotion, or a matching JOSE task id"
+            )
         if task_id in seen:
             raise ValueError(f"Duplicate comparison task: {task_id}")
         seen.add(task_id)
@@ -86,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="JOSE four-way method comparison")
     parser.add_argument(
         "--case", nargs=2, action="append", required=True, metavar=("TASK", "TEACHER_CHECKPOINT"),
-        help="Repeat 1--3 times for any subset of walk/dance/jump",
+        help="Repeat 1--3 times for any subset of walk/dance/jump/locomotion",
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--num-envs", type=int, default=256)
@@ -209,10 +218,11 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         # Otherwise train_history_student.py falls back to its own per-task default.
         common_student.extend(["--eval-steps", str(args.eval_steps)])
     output = _method_output(method, task, seed, run_root)
+    adapter, agent = TASK_ADAPTERS[task]
     if method == "PrivilegedTeacher":
         command = [
             sys.executable, str(root / "evaluate_teacher.py"), "--teacher-checkpoint", teacher,
-            "--task", task, "--agent", "skrl_amp_cfg_entry_point", "--adapter", "amp",
+            "--task", task, "--agent", agent, "--adapter", adapter,
             "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--output-dir", str(output.parent),
             "--run-name", output.name,
@@ -220,7 +230,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
     elif method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
         command = [
-            sys.executable, str(root / script), *common_student,
+            sys.executable, str(root / script), *common_student, "--adapter", adapter,
             # Same dataset cap as the estimator, and the same reservoir eviction
             # behind it (estimator/models.py:ReplayBuffer), so "how much data the
             # method gets to learn from" isn't a confound either.
@@ -230,7 +240,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
     else:
         command = [
             sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
-            "--task", task, "--seed", str(seed), "--num-envs", str(args.num_envs),
+            "--task", task, "--adapter", adapter, "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
             "--dagger-rounds", str(args.estimator_dagger_rounds),
             "--dagger-epochs", str(args.estimator_dagger_epochs), "--estimator", "LSTM",

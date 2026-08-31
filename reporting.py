@@ -47,7 +47,7 @@ def _numeric(values: Iterable) -> list[float]:
 
 def aggregate(rows: list[dict]) -> list[dict]:
     # teacher_id distinguishes rows collected from different teacher checkpoints
-    # (e.g. a run_checkpoint_sweep.py comparison across checkpoints); it is
+    # (e.g. a run_all_ablation.py comparison across checkpoints); it is
     # absent from normal single-checkpoint studies, where every row shares the
     # same default and grouping is unaffected.
     groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)

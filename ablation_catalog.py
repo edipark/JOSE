@@ -72,8 +72,11 @@ TASKS = {
     "amp_dance": ("Isaac-G1-AMP-Dance-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     "amp_jump": ("Isaac-G1-AMP-Jump-JOSE-Direct-v0", "amp", "skrl_amp_cfg_entry_point"),
     # Manager-based walk teacher trained with rsl-rl; same estimator methodology.
-    # (The SKRL Direct PPO walk task it replaced was removed.)
-    "ppo_walk": (
+    # (The SKRL Direct PPO walk task it replaced was removed.) Keyed
+    # "locomotion" rather than "ppo_walk" to read as a task, not the adapter
+    # that happens to implement it -- the middle tuple element below is the
+    # adapter kind ("ppo_walk"), which PolicyAdapter code still names that way.
+    "locomotion": (
         "Isaac-G1-PPO-Walk-Estimator-JOSE-v0",
         "ppo_walk",
         "rsl_rl_cfg_entry_point",
@@ -107,7 +110,7 @@ TASK_IMPLEMENTATION = {
     "amp_walk": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_amp_cfg.yaml"),
     "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
     "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
-    "ppo_walk": (
+    "locomotion": (
         "__init__.py",
         "ppo_walk/g1_asset.py",
         "ppo_walk/walk_env_cfg.py",

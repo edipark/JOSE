@@ -1,6 +1,6 @@
 """Shared subprocess/fingerprinting primitives used by the ablation entry points.
 
-``ablation_runner.py`` and ``run_method_comparison.py`` (and ``run_checkpoint_sweep.py``)
+``ablation_runner.py`` and ``run_method_comparison.py`` (and ``run_all_ablation.py``)
 each drive subprocesses over a teacher checkpoint and need the same handful of
 low-level building blocks. They used to carry independent copies of these that
 drifted apart; this module is the single source.
@@ -68,13 +68,13 @@ def run_live_subprocess(command: list[str], log_path: Path) -> int:
 
 
 def default_estimator_window(task_id: str) -> int:
-    """Default DAgger history window for a Gym task id.
+    """Default DAgger history window shared by every task.
 
     Mirrors ``train_state_estimator.py``'s own ``--window`` default. Duplicated
     here rather than imported because that module launches the Isaac Sim app
     as an import-time side effect and cannot be imported just for this constant.
     """
-    return 25 if task_id == "Isaac-G1-AMP-Walk-JOSE-Direct-v0" else 50
+    return 25
 
 
 def implementation_fingerprint(paths: tuple[str, ...]) -> str:

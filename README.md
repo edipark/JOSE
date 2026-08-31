@@ -419,24 +419,24 @@ The state estimator learns from a fixed teacher. It uses a history of joint posi
 
 ### Train an estimator
 
-The default model is a two-layer LSTM with a 50-frame history.
+The default model is a two-layer LSTM with a 25-frame history for every task.
 
 ```bash
 python -m jose.train_state_estimator \
   --teacher-checkpoint "$TEACHER" \
   --task Isaac-G1-AMP-Walk-JOSE-Direct-v0 \
   --estimator LSTM \
-  --window 50 \
+  --window 25 \
   --joint-preset all \
   --dagger-rounds 10 \
-  --run-name walk_lstm_w50 \
+  --run-name walk_lstm_w25 \
   --headless
 ```
 
 The result is saved in:
 
 ```text
-logs/jose_g1/estimators/walk_lstm_w50/
+logs/jose_g1/estimators/walk_lstm_w25/
 ```
 
 Use `best_estimator.pt` for evaluation and playback.
@@ -456,7 +456,7 @@ python -m jose.train_state_estimator \
   --teacher-checkpoint logs/rsl_rl/isaac_g1_ppo_walk_estimator_jose_v0/<run>/model_<n>.pt \
   --task Isaac-G1-PPO-Walk-Estimator-JOSE-v0 \
   --adapter ppo_walk \
-  --run-name ppo_walk_lstm_w50 \
+  --run-name ppo_walk_lstm_w25 \
   --headless
 ```
 
@@ -481,8 +481,9 @@ Two things to know about this variant:
   the way in, matching the observation term's own scale.
 
 The same `--adapter ppo_walk` flag works for `evaluate_teacher.py` and
-`play_teacher_with_estimator.py`, and `ablation_runner.py` exposes the task as
-`--task ppo_walk`.
+`play_teacher_with_estimator.py`. In the ablation/comparison scripts this task
+is keyed `locomotion` rather than `ppo_walk` -- that name is reserved for the
+adapter kind -- so `ablation_runner.py` exposes it as `--task locomotion`.
 
 For a short test run, use less data and fewer training rounds:
 
@@ -543,7 +544,7 @@ an estimator. `evaluate_teacher.py` is the estimator-pipeline baseline;
 ### Play the teacher with an estimator
 
 ```bash
-export ESTIMATOR=logs/jose_g1/estimators/walk_lstm_w50/best_estimator.pt
+export ESTIMATOR=logs/jose_g1/estimators/walk_lstm_w25/best_estimator.pt
 
 python -m jose.play_teacher_with_estimator \
   --teacher-checkpoint "$TEACHER" \
@@ -793,53 +794,54 @@ python -m jose.generate_report \
 not require every individual plot to have qualifying data — a plot skipped for
 that reason is reported in `report.md` instead of raising an error.
 
-### Sweeping across checkpoints
+### Running every study against a checkpoint
 
 `run_architecture_ablation.py`, `run_window_ablation.py`,
 `run_joint_scope_ablation.py`, `run_dagger_ablation.py`, and
-`run_method_comparison.py` each take one
-teacher checkpoint per invocation. `run_checkpoint_sweep.py` repeats one of
-them across every checkpoint in a training run (e.g. `agent_10000.pt` ..
-`agent_100000.pt`, plus `best_agent.pt`) and merges the resulting
-`results.jsonl` files into one comparison report, so you can see how an
-ablation's outcome changes over the course of training rather than only at the
-final checkpoint.
+`run_method_comparison.py` each answer a different question about the same
+teacher checkpoint, and each wants its own `--task`/`--seeds`/`--headless`
+restated. `run_all_ablation.py` takes those settings once and applies them
+uniformly across all five studies (or a chosen subset), against one or more
+checkpoints:
 
 ```bash
-python -m jose.run_checkpoint_sweep \
-  --ablation-script architecture \
-  --checkpoint-dir logs/skrl/g1_jose_amp_walk/<run>/checkpoints \
-  --glob "agent_*.pt" \
-  --include-best \
-  --sweep-output-dir logs/jose_g1/ablation/sweeps/amp_walk_architecture \
-  -- --task amp_walk --seeds 3 --fast --headless
+python -m jose.run_all_ablation \
+  --checkpoints logs/skrl/g1_jose_amp_walk/AMP_walk/checkpoints/best_agent.pt \
+  --task amp_walk \
+  --seeds 42 \
+  --headless
 ```
 
-Everything after the bare `--` is forwarded unchanged to each per-checkpoint
-invocation, exactly like the flags shown for `run_architecture_ablation.py`
-above. `--ablation-script` selects the target (`architecture`, `window`,
-`joint_scope`, or `method_comparison`); `method_comparison` additionally
-requires `--case-task {walk,dance,jump}` in place of passthrough `--task`,
-since that script's own `--case` flag bundles a task with its checkpoint:
+That runs all five studies once each, in order (architecture, window,
+joint_scope, dagger, method_comparison), against the one checkpoint given,
+sharing `--task amp_walk`, one seed, and headless mode. `--task` takes
+`ablation_catalog.py`'s vocabulary (`amp_walk`, `amp_dance`, `amp_jump`,
+`locomotion`); it is translated automatically to `run_method_comparison.py`'s
+own `walk`/`dance`/`jump`/`locomotion` for that one study.
 
-```bash
-python -m jose.run_checkpoint_sweep \
-  --ablation-script method_comparison \
-  --checkpoint-dir logs/skrl/g1_jose_amp_walk/<run>/checkpoints \
-  --case-task walk \
-  -- --seeds 42 43 44 --fast --headless
-```
+Pass `--studies` to run a subset instead of all five, e.g.
+`--studies dagger method_comparison`. `--seeds` is forwarded as-is to
+`run_method_comparison.py`, which accepts any set; the other four studies only
+take a contiguous range (a starting seed plus a count), so a non-contiguous
+`--seeds` is rejected for those with a clear error rather than silently
+dropped. Omit `--seeds` to leave every study at its own default (3 seeds).
 
-Use `--dry-run` first to check the resolved checkpoint list and the exact
-command each one will run. Each checkpoint still lands in the normal
-content-addressed catalog under `--output-dir`, so a failed or interrupted
-sweep can just be re-run — completed checkpoints are reused, not repeated;
-pass `--continue-on-error` to keep sweeping past a checkpoint whose run fails
-instead of aborting. The merged output goes to `--sweep-output-dir`
-(default `<output-dir>/sweeps/<script>_<date>/`): `combined_results.jsonl`,
-`sweep_manifest.json` (per-checkpoint status), and a `report/` bundle exactly
-like a single study's, with an added `teacher_id` column identifying which
-checkpoint each row came from.
+Give `--checkpoints` more than one path to also sweep across checkpoints --
+each study still runs once per checkpoint, and its results are merged into one
+report per study (never across studies: two studies can legitimately share an
+experiment slug, such as `architecture` and `joint_scope` both including
+`lstm_w25_all`, and merging those rows together would double-count that arm).
+
+Use `--dry-run` first to check the exact command each study/checkpoint pair
+will run. Every run still lands in the normal content-addressed catalog under
+`--output-dir`, so a failed or interrupted sweep can just be re-run --
+completed jobs are reused, not repeated; pass `--continue-on-error` to keep
+sweeping past a failure instead of aborting. Output goes to
+`--sweep-output-dir` (default `<output-dir>/sweeps/<date>/`): a top-level
+`sweep_manifest.json` (per-study, per-checkpoint status), and under each
+study's own subdirectory, `combined_results.jsonl` and a `report/` bundle
+exactly like a single study's, with an added `teacher_id` column identifying
+which checkpoint each row came from.
 
 ## Motion tools
 
@@ -1000,7 +1002,7 @@ python -m jose.motions.motion_replayer --help
 │   run_joint_scope_ablation.py,
 │   run_dagger_ablation.py                 # Estimator architecture/window/joint-scope/DAgger studies
 ├── run_method_comparison.py               # Four-way Teacher/IMU/Joint-only/JOSE comparison
-└── run_checkpoint_sweep.py                # Repeat any of the above across many checkpoints
+└── run_all_ablation.py                # All ablations
 ```
 
 JOSE runs policy control at 50 Hz and uses all 29 G1 joints. The default estimator input contains 29 joint positions and 29 simulator joint velocities. Direct history students do not use explicit base linear velocity or raw accelerometer data.
