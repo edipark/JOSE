@@ -234,6 +234,85 @@ def test_ppo_walk_history_indices_cover_every_estimated_frame():
     assert set(indices) == allowed
 
 
+def test_locomotion_summarize_normalizes_each_axis_by_its_command_range():
+    """track_error_norm must be dimensionless: vx is m/s, yaw is rad/s."""
+    locomotion = _load_module("jose_g1_locomotion_test", JOSE_DIR / "estimator" / "locomotion.py")
+
+    def row(vx_rmse, vy_rmse, yaw_rmse):
+        return {
+            "command": {"vx": 0.0, "vy": 0.0, "yaw": 0.0},
+            "measured": {"vx": 0.0, "vy": 0.0, "yaw": 0.0},
+            "error": {
+                "vx_rmse": vx_rmse, "vy_rmse": vy_rmse, "yaw_rmse": yaw_rmse,
+                "vx_mean": 0.0, "vy_mean": 0.0, "yaw_mean": 0.0,
+            },
+            "survival_rate": 1.0, "fall_count": 0, "base_height_m": 0.78,
+            "feet_air_time_reward": 0.1, "feet_slide_penalty": 0.0,
+            "foot_lifts_per_s": 2.0, "double_stance_fraction": 0.3, "drift_speed_mps": 0.0,
+        }
+
+    metrics = locomotion.summarize({"a": row(0.2, 0.1, 0.4), "b": row(0.4, 0.3, 0.6)})
+    assert metrics["track_vx_rmse"] == pytest.approx(0.3)
+    assert metrics["track_vy_rmse"] == pytest.approx(0.2)
+    assert metrics["track_yaw_rmse"] == pytest.approx(0.5)
+    # each axis divided by its own range (1.0, 0.5, 1.0) before averaging
+    assert locomotion.COMMAND_SCALES == (1.0, 0.5, 1.0)
+    assert metrics["track_error_norm"] == pytest.approx((0.3 / 1.0 + 0.2 / 0.5 + 0.5 / 1.0) / 3.0)
+    assert len(metrics["command_tracking"]) == 2
+
+
+def test_locomotion_eval_commands_include_the_zero_command():
+    """The zero row is the only one that exposes creeping or marching in place."""
+    locomotion = _load_module("jose_g1_locomotion_commands_test", JOSE_DIR / "estimator" / "locomotion.py")
+    assert (0.0, 0.0, 0.0) in locomotion.EVAL_COMMANDS
+    # forward sweep must have at least two distinct nonzero speeds for the
+    # monotonicity sanity check to mean anything
+    forward = sorted({vx for vx, vy, yaw in locomotion.EVAL_COMMANDS if vy == 0.0 and yaw == 0.0})
+    assert len(forward) >= 3 and forward[0] == 0.0
+    # yaw must be probed in both directions, or a sign error passes unnoticed
+    yaws = {yaw for vx, vy, yaw in locomotion.EVAL_COMMANDS}
+    assert any(y > 0 for y in yaws) and any(y < 0 for y in yaws)
+
+
+def test_report_table_picks_its_columns_from_the_metrics_present():
+    amp_row = {
+        "task": "amp_walk", "experiment": "JOSE", "successful": 3, "seeds": 3,
+        "episode_length_mean_mean": 850.0, "mpjpe_g_mean": 40.0,
+    }
+    walk_row = {
+        "task": "ppo_walk", "experiment": "JOSE", "successful": 3, "seeds": 3,
+        "track_error_norm_mean": 0.25, "track_vx_rmse_mean": 0.15,
+        "episode_length_mean_mean": 1000.0,
+    }
+    amp_only = reporting._markdown_table([amp_row])
+    assert "MPJPE-G mm" in amp_only and "Track err" not in amp_only
+
+    walk_only = reporting._markdown_table([walk_row])
+    assert "Track err" in walk_only and "vx RMSE" in walk_only
+    # MPJPE is dropped for locomotion: gait phase, not estimator error, dominates it
+    assert "MPJPE-G mm" not in walk_only
+
+    mixed = reporting._markdown_table([amp_row, walk_row])
+    assert "MPJPE-G mm" in mixed and "Track err" in mixed
+    assert mixed.count("| Task | Experiment |") == 2
+
+
+def test_aggregate_adds_teacher_relative_tracking_deltas():
+    rows = [
+        {"task": "ppo_walk", "experiment": "TeacherGT", "status": "ok",
+         "metrics": {"track_error_norm": 0.20, "track_vx_rmse": 0.10, "episode_length_mean": 1000.0}},
+        {"task": "ppo_walk", "experiment": "JOSE-LSTM", "status": "ok",
+         "metrics": {"track_error_norm": 0.25, "track_vx_rmse": 0.16, "episode_length_mean": 1000.0}},
+    ]
+    summary = {row["experiment"]: row for row in reporting.aggregate(rows)}
+    jose = summary["JOSE-LSTM"]
+    assert jose["track_error_norm_delta"] == pytest.approx(0.05)
+    assert jose["track_vx_rmse_delta"] == pytest.approx(0.06)
+    assert jose["track_error_ratio_percent"] == pytest.approx(125.0)
+    # the teacher is its own baseline, so its delta is zero rather than absent
+    assert summary["TeacherGT"]["track_error_norm_delta"] == pytest.approx(0.0)
+
+
 def test_ppo_walk_target_scales_follow_the_observation_terms():
     """base_ang_vel is stored pre-scaled by 0.2, so estimates must be scaled to match."""
     scales = schema.ppo_walk_target_scales()

@@ -111,6 +111,14 @@ def _parser(experiments: tuple[AblationExperiment, ...], study_name: str) -> arg
     parser.add_argument("--noise-levels", type=float, nargs="+", default=[0.0, 0.01, 0.02])
     parser.add_argument("--eval-episodes", type=int, default=200)
     parser.add_argument(
+        "--grid-settle-s", type=float, default=1.0,
+        help="Locomotion command grid: settle seconds per command (ppo_walk only)",
+    )
+    parser.add_argument(
+        "--grid-measure-s", type=float, default=4.0,
+        help="Locomotion command grid: measured seconds per command (ppo_walk only)",
+    )
+    parser.add_argument(
         "--experiments", nargs="+", choices=tuple(item.slug for item in experiments), default=None,
         help="Run only selected canonical experiments (teacher_gt is always included)",
     )
@@ -449,6 +457,8 @@ def main(
                     "--task", task_id, "--agent", agent, "--adapter", adapter,
                     "--seed", str(seed), "--num-envs", str(args.num_envs),
                     "--collect-steps", str(args.collect_steps), "--output-dir", str(attempt),
+                    "--grid-settle-s", str(args.grid_settle_s),
+                    "--grid-measure-s", str(args.grid_measure_s),
                     "--run-name", "artifact",
                 ]
             else:
@@ -487,6 +497,8 @@ def main(
                     "--num_envs", str(args.num_envs), "--seed", str(seed),
                     "--dataset-cache", str(cache), "--run-name", "artifact",
                     "--dataset-cache-window", str(cache_window), "--output-dir", str(attempt),
+                    "--grid-settle-s", str(args.grid_settle_s),
+                    "--grid-measure-s", str(args.grid_measure_s),
                 ]
             if args.headless:
                 command.append("--headless")

@@ -78,7 +78,7 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
     robot = G1_AMP_ROBOT_CFG.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
-    reset_strategy = "default"
+    reset_strategy = "random_start"
     # G1_dance.npz is 10.02 s long; the inherited 20 s episode asked the policy
     # to sustain a non-periodic clip for 2x its own length, the same fixed-point
     # incentive that made the jump task collapse before its episode length was

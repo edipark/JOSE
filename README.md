@@ -704,6 +704,54 @@ python -m jose.run_architecture_ablation \
 
 Use `--rerun` to run completed ablation jobs again.
 
+### Ablations on the PPO walk teacher
+
+Every ablation runs on the velocity-tracking walk task too. Change `--task` and
+the checkpoint; nothing else about the command changes:
+
+```bash
+python -m jose.run_architecture_ablation \
+  --task ppo_walk \
+  --teacher-checkpoint logs/rsl_rl/isaac_g1_ppo_walk_estimator_jose_v0/<run>/model_<n>.pt \
+  --headless
+```
+
+The report it writes is not the AMP one, because the AMP columns do not separate
+anything here. A competent walk teacher survives all 1000 steps of every episode,
+so `Episode steps`, `Death %` and `Timeout %` pin to their ceilings for every
+arm. What moves instead is whether the robot still follows the commanded
+velocity once the estimator supplies the base state, so the table swaps in:
+
+| Column | Meaning |
+|---|---|
+| `vx / vy / yaw RMSE` | Per-axis command-tracking error, in m/s and rad/s |
+| `Track err` | Each axis RMSE divided by its own command range, then averaged. Dimensionless, so the three axes can be summarised in one number |
+| `Δ vs teacher %` | `Track err` as a percentage of the TeacherGT row's, i.e. how much of the teacher's command tracking the method keeps |
+| `Lifts/s`, `Dbl stance` | Gait quality, to catch an arm that tracks the command with a broken gait |
+
+`MPJPE-G/L` is dropped from this table: the task is to follow a command, not to
+reproduce a motion, so two policies can both track perfectly with different gait
+phase and MPJPE would report that phase difference as error. `root_position_error`
+is still recorded in `summary.json`, where it does mean something -- drift away
+from where the teacher would have been.
+
+Tracking is measured over a **fixed command grid**, not the environment's random
+sampler. Each of eight commands -- stand still, forward at 0.3 and 0.6 m/s,
+sideways, turn either way, and one combined -- is pinned across every environment
+and measured after a settle window. That makes the numbers deterministic and
+comparable between arms, and keeps the per-command breakdown in
+`training.json`'s `command_tracking`, where the zero-command row is the one that
+exposes creeping or marching in place. Data *collection* and DAgger still use the
+environment's random command distribution, which is what deployment looks like.
+
+Tune the measurement window with `--grid-settle-s` (default 1.0) and
+`--grid-measure-s` (default 4.0). The defaults cost about the same simulation as
+the episode-based evaluation that runs alongside them.
+
+DAgger round selection follows the same logic: on this task it ranks rounds by
+command tracking. Leading with episode length, as the AMP tasks do, would be a
+tie among all rounds and would silently fall through to open-loop estimator RMSE.
+
 ### Compare all four methods
 
 This command compares the teacher, estimator, joint-only student, and IMU student:

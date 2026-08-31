@@ -83,6 +83,7 @@ TASKS = {
 TRAINING_IMPLEMENTATION = (
     "train_state_estimator.py",
     "estimator/pipeline.py",
+    "estimator/locomotion.py",
     "estimator/adapters.py",
     "estimator/metrics.py",
     "estimator/models.py",
@@ -95,6 +96,8 @@ TRAINING_IMPLEMENTATION = (
 )
 TEACHER_IMPLEMENTATION = (
     "evaluate_teacher.py",
+    "estimator/pipeline.py",
+    "estimator/locomotion.py",
     "estimator/adapters.py",
     "schema.py",
     "skrl_compat.py",

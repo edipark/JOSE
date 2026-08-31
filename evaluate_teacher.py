@@ -20,6 +20,14 @@ parser.add_argument("--collect-steps", type=int, default=2000)
 parser.add_argument("--epochs", type=int, default=0, help="Accepted for ablation command compatibility")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument(
+    "--grid-settle-s", type=float, default=1.0,
+    help="Locomotion grid: seconds discarded after reset before measuring (ppo_walk only)",
+)
+parser.add_argument(
+    "--grid-measure-s", type=float, default=4.0,
+    help="Locomotion grid: seconds measured per command (ppo_walk only)",
+)
+parser.add_argument(
     "--mpjpe-horizon", type=int, default=100,
     help="Steps of teacher-paired rollout used for the MPJPE motion-fidelity metrics.",
 )
@@ -49,7 +57,12 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
 from jose.estimator.adapters import make_policy_adapter
-from jose.estimator.pipeline import collect_rollout, evaluate_paired_motion_fidelity
+from jose.estimator.pipeline import (
+    collect_rollout,
+    evaluate_locomotion_grid,
+    evaluate_paired_motion_fidelity,
+    uses_locomotion_eval,
+)
 from jose.skrl_compat import disable_velocity_termination_for_evaluation
 from jose.teacher_setup import build_env_and_teacher, teacher_policy_module
 
@@ -115,6 +128,22 @@ def main(env_cfg, agent_cfg):
             seed=args_cli.seed, horizon=args_cli.mpjpe_horizon,
         )
     )
+    # Command tracking from the true privileged state. This is the baseline the
+    # report subtracts every estimator arm against, so it has to come from the
+    # same grid, the same window and the same code as those arms.
+    sanity_checks = None
+    if uses_locomotion_eval(adapter):
+        grid = evaluate_locomotion_grid(
+            env, adapter, teacher_agent, None, "NONE", 1,
+            settle_s=args_cli.grid_settle_s,
+            measure_s=args_cli.grid_measure_s,
+            seed=args_cli.seed,
+            # Whether the teacher walks at all. Kept out of the comparison table
+            # but recorded: a teacher failing these makes every other row moot.
+            with_sanity_checks=True,
+        )
+        sanity_checks = grid.pop("sanity_checks")
+        metrics.update(grid)
     default_name = (
         f"{args_cli.task}_TeacherGT_seed{args_cli.seed}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
@@ -139,9 +168,10 @@ def main(env_cfg, agent_cfg):
         ),
         "training_velocity_threshold_m_s": velocity_threshold,
     }
-    (output / "training.json").write_text(
-        json.dumps({"config": config, "metrics": metrics}, indent=2), encoding="utf-8"
-    )
+    payload = {"config": config, "metrics": metrics}
+    if sanity_checks is not None:
+        payload["sanity_checks"] = sanity_checks
+    (output / "training.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(
         f"TeacherGT eplen={metrics['episode_length_mean']:.2f} "
         f"return={metrics['return_mean']:.4f} success={metrics['success_rate']:.2f}%"

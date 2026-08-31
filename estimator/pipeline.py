@@ -346,6 +346,101 @@ def evaluate_estimator_closed_loop(
     }
 
 
+def uses_locomotion_eval(adapter: PolicyAdapter) -> bool:
+    """Whether this adapter's task is judged by command tracking.
+
+    Dispatching on the adapter rather than the task id keeps the decision with
+    the object that already knows the observation contract, so a new locomotion
+    task inherits the right evaluation by choosing the right adapter.
+    """
+    return adapter.name() == "ppo_walk"
+
+
+@torch.no_grad()
+def evaluate_locomotion_grid(
+    env,
+    adapter: PolicyAdapter,
+    teacher_agent,
+    estimator: NormalizedEstimator | None,
+    estimator_type: str,
+    window: int,
+    settle_s: float = 1.0,
+    measure_s: float = 4.0,
+    seed: int | None = None,
+    with_sanity_checks: bool = False,
+) -> dict:
+    """Command-tracking evaluation for the locomotion task.
+
+    The episode-based evaluation above is kept because it produces
+    `episode_length_mean` and the survival columns, but on this task those pin to
+    their ceilings for any competent teacher and separate nothing. This drives
+    the same policy over a fixed command grid instead and reports how well it
+    still follows each command -- with `estimator` set, through the estimate; with
+    it None, from the true privileged state, which is the teacher baseline the
+    report subtracts against.
+
+    Estimator RMSE is accumulated in the same rollout, so it is measured under
+    exactly the states the tracking numbers were measured under.
+    """
+    from .locomotion import CommandEvaluator, resolve_feet_cfgs, run_sanity_checks, summarize
+
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+    unwrapped = adapter.core_env
+    feet_sensor_cfg, feet_asset_cfg = resolve_feet_cfgs(unwrapped.scene)
+    step_dt = unwrapped.step_dt
+    evaluator = CommandEvaluator(
+        env,
+        feet_sensor_cfg,
+        feet_asset_cfg,
+        settle_steps=int(round(settle_s / step_dt)),
+        measure_steps=int(round(measure_s / step_dt)),
+    )
+
+    history: HistoryBuffer | None = None
+    squared_error = torch.zeros(adapter.schema.estimator_target_dim, dtype=torch.float64)
+    sample_count = 0
+
+    if estimator is not None:
+        estimator.eval()
+    teacher_agent.enable_training_mode(False, apply_to_models=True)
+
+    def act(observations):
+        nonlocal history, squared_error, sample_count
+        if estimator is None:
+            return adapter.action(teacher_agent, observations)
+        if history is None:
+            history = HistoryBuffer(observations.shape[0], window, adapter.input_dim, observations.device)
+        frame = adapter.estimator_input()
+        target = adapter.estimator_target()
+        sequence = history.push(frame)
+        model_input = frame if estimator_type.upper() == "MLP" else sequence
+        estimate = estimator.predict(model_input)
+        squared_error += (estimate - target).double().square().sum(dim=0).cpu()
+        sample_count += target.shape[0]
+        return adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
+
+    def on_step(dones):
+        if history is not None and dones.any():
+            history.reset(dones)
+
+    results = evaluator.run_all(act, on_step=on_step)
+    metrics = summarize(results)
+    if with_sanity_checks:
+        # Run here rather than in the caller: the checks need the full per-command
+        # records, which `summarize` deliberately trims down for the report.
+        metrics["sanity_checks"] = [
+            {"name": name, "passed": passed, "detail": detail}
+            for name, passed, detail in run_sanity_checks(results)
+        ]
+    if estimator is not None and sample_count:
+        target_rmse = (squared_error / sample_count).sqrt().float()
+        metrics["grid_rmse"] = float(target_rmse.square().mean().sqrt())
+        metrics["grid_target_rmse"] = target_rmse.tolist()
+    return metrics
+
+
 @torch.no_grad()
 def _record_body_trajectory(env, adapter, policy, *, seed: int, horizon: int, on_reset=None):
     """Roll `policy` for `horizon` steps from a seeded reset, logging body positions."""

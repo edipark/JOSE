@@ -18,7 +18,16 @@ PRIMARY_METRICS = (
     "raw_task_reward", "amp_raw_style", "amp_scaled_task", "amp_scaled_style", "amp_effective_reward",
     "wall_time_s", "collection_duration_s", "collection_samples_per_s",
     "mpjpe_g", "mpjpe_l", "root_position_error",
+    # Locomotion (ppo_walk). Absent from AMP rows, which simply leaves them out
+    # of those summaries; `_markdown_table` keys the column set off their presence.
+    "track_vx_rmse", "track_vy_rmse", "track_yaw_rmse",
+    "track_vx_bias", "track_vy_bias", "track_yaw_bias", "track_error_norm",
+    "foot_lifts_per_s", "double_stance_fraction", "feet_air_time_reward", "feet_slide_penalty",
+    "grid_survival_rate", "grid_drift_speed_mps", "grid_fall_count", "grid_rmse",
 )
+
+# Axes carried into the teacher-relative deltas computed by `aggregate`.
+TRACKING_AXES = ("track_vx_rmse", "track_vy_rmse", "track_yaw_rmse", "track_error_norm")
 
 # Metrics plotted against metrics.learning_curve's "step" (cumulative gradient
 # steps) when present -- see _plots()'s learning_curves figure.
@@ -72,42 +81,112 @@ def aggregate(rows: list[dict]) -> list[dict]:
         if row["experiment"].lower() in ("teachergt", "teacher_gt")
         and row.get("episode_length_mean_mean", 0.0) > 0.0
     }
+    # Same join for command tracking: how much worse each method follows the
+    # command than the teacher does from the true privileged state. Done here
+    # rather than in the run so it costs no extra simulation -- the TeacherGT arm
+    # already measured the baseline on the same fixed command grid.
+    teacher_tracking = {
+        (row["task"], row["teacher_id"]): row
+        for row in output
+        if row["experiment"].lower() in ("teachergt", "teacher_gt")
+        and "track_error_norm_mean" in row
+    }
     for row in output:
         baseline = teacher_lengths.get((row["task"], row["teacher_id"]))
         if baseline is not None and "episode_length_mean_mean" in row:
             row["episode_length_ratio_percent"] = 100.0 * row["episode_length_mean_mean"] / baseline
+        reference = teacher_tracking.get((row["task"], row["teacher_id"]))
+        if reference is None:
+            continue
+        for metric in TRACKING_AXES:
+            key = f"{metric}_mean"
+            if key in row and key in reference:
+                row[f"{metric}_delta"] = row[key] - reference[key]
+        if reference.get("track_error_norm_mean", 0.0) > 0.0 and "track_error_norm_mean" in row:
+            row["track_error_ratio_percent"] = (
+                100.0 * row["track_error_norm_mean"] / reference["track_error_norm_mean"]
+            )
     return output
 
 
-def _markdown_table(rows: list[dict]) -> str:
+def _mean_std(row: dict, metric: str, digits: int = 1) -> str:
+    value = row.get(f"{metric}_mean")
+    if value is None:
+        return ""
+    deviation = row.get(f"{metric}_std", 0.0)
+    return f"{value:.{digits}f} ± {deviation:.{digits}f}"
+
+
+def _motion_table(rows: list[dict]) -> str:
+    """Columns for the AMP tasks, where survival and motion fidelity separate methods."""
     columns = (
         "Task", "Experiment", "OK/Seeds", "Episode steps", "Within-run sigma",
         "Death %", "Timeout %", "Teacher ratio %", "Return", "RMSE", "R2", "Latency ms",
         "MPJPE-G mm", "MPJPE-L mm",
     )
-    header = "| " + " | ".join(columns) + " |"
-    divider = "| " + " | ".join("---" for _ in columns) + " |"
-
-    def mean_std(row: dict, metric: str, digits: int = 1) -> str:
-        value = row.get(f"{metric}_mean")
-        if value is None:
-            return ""
-        deviation = row.get(f"{metric}_std", 0.0)
-        return f"{value:.{digits}f} ± {deviation:.{digits}f}"
-
     body = []
     for row in rows:
-        cells = (
+        body.append((
             row["task"], row["experiment"], f"{row['successful']}/{row['seeds']}",
-            mean_std(row, "episode_length_mean"), mean_std(row, "episode_length_std"),
-            mean_std(row, "death_rate"), mean_std(row, "timeout_rate"),
+            _mean_std(row, "episode_length_mean"), _mean_std(row, "episode_length_std"),
+            _mean_std(row, "death_rate"), _mean_std(row, "timeout_rate"),
             f"{row['episode_length_ratio_percent']:.1f}" if "episode_length_ratio_percent" in row else "",
-            mean_std(row, "return_mean", 2), mean_std(row, "rmse", 4),
-            mean_std(row, "r2", 4), mean_std(row, "inference_ms_per_sample", 4),
-            mean_std(row, "mpjpe_g", 1), mean_std(row, "mpjpe_l", 1),
-        )
-        body.append("| " + " | ".join(cells) + " |")
-    return "\n".join((header, divider, *body))
+            _mean_std(row, "return_mean", 2), _mean_std(row, "rmse", 4),
+            _mean_std(row, "r2", 4), _mean_std(row, "inference_ms_per_sample", 4),
+            _mean_std(row, "mpjpe_g", 1), _mean_std(row, "mpjpe_l", 1),
+        ))
+    return _render(columns, body)
+
+
+def _locomotion_table(rows: list[dict]) -> str:
+    """Columns for the velocity-tracking task.
+
+    MPJPE is dropped: two policies can both follow the command perfectly with
+    different gait phase, and over any useful horizon that phase difference
+    dominates the number. Episode length and death rate are kept but sit late in
+    the row, because a competent teacher pins them to 1000 and 0% -- the columns
+    that move here are the tracking errors.
+    """
+    columns = (
+        "Task", "Experiment", "OK/Seeds", "vx RMSE", "vy RMSE", "yaw RMSE",
+        "Track err", "Δ vs teacher %", "Lifts/s", "Dbl stance",
+        "Episode steps", "Death %", "Est. RMSE", "Latency ms",
+    )
+    body = []
+    for row in rows:
+        body.append((
+            row["task"], row["experiment"], f"{row['successful']}/{row['seeds']}",
+            _mean_std(row, "track_vx_rmse", 3), _mean_std(row, "track_vy_rmse", 3),
+            _mean_std(row, "track_yaw_rmse", 3), _mean_std(row, "track_error_norm", 4),
+            f"{row['track_error_ratio_percent']:.1f}" if "track_error_ratio_percent" in row else "",
+            _mean_std(row, "foot_lifts_per_s", 2), _mean_std(row, "double_stance_fraction", 3),
+            _mean_std(row, "episode_length_mean"), _mean_std(row, "death_rate"),
+            _mean_std(row, "rmse", 4), _mean_std(row, "inference_ms_per_sample", 4),
+        ))
+    return _render(columns, body)
+
+
+def _render(columns: tuple[str, ...], body: list[tuple[str, ...]]) -> str:
+    header = "| " + " | ".join(columns) + " |"
+    divider = "| " + " | ".join("---" for _ in columns) + " |"
+    return "\n".join((header, divider, *("| " + " | ".join(cells) + " |" for cells in body)))
+
+
+def _markdown_table(rows: list[dict]) -> str:
+    """Render each row group with the column set its metrics support.
+
+    Keyed off whether the rows carry tracking metrics rather than off the task
+    name, so a study mixing AMP and locomotion rows emits both tables and a new
+    locomotion task needs no change here.
+    """
+    tracking = [row for row in rows if "track_error_norm_mean" in row]
+    motion = [row for row in rows if "track_error_norm_mean" not in row]
+    tables = []
+    if motion:
+        tables.append(_motion_table(motion))
+    if tracking:
+        tables.append(_locomotion_table(tracking))
+    return "\n\n".join(tables) if tables else _motion_table(rows)
 
 
 def _group_label(row: dict) -> str:

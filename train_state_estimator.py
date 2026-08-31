@@ -61,6 +61,14 @@ parser.add_argument(
 parser.add_argument("--eval_episodes", "--eval-episodes", dest="eval_episodes", type=int, default=200)
 parser.add_argument("--max_episode_steps", "--max-episode-steps", dest="max_episode_steps", type=int, default=1000)
 parser.add_argument("--eval-seed-offset", type=int, default=10000)
+parser.add_argument(
+    "--grid-settle-s", type=float, default=1.0,
+    help="Locomotion grid: seconds discarded after reset before measuring (ppo_walk only)",
+)
+parser.add_argument(
+    "--grid-measure-s", type=float, default=4.0,
+    help="Locomotion grid: seconds measured per command (ppo_walk only)",
+)
 parser.add_argument("--num_envs", "--num-envs", dest="num_envs", type=int, default=256)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--output_dir", "--output-dir", dest="output_dir", default="logs/jose_g1/estimators")
@@ -93,10 +101,12 @@ from jose.estimator.pipeline import (
     RolloutDataset,
     collect_rollout,
     evaluate_estimator_closed_loop,
+    evaluate_locomotion_grid,
     evaluate_paired_motion_fidelity,
     evaluate_predictions,
     save_jose_checkpoint,
     train_estimator,
+    uses_locomotion_eval,
 )
 from jose.schema import JOINT_PRESETS, SCHEMA_VERSION
 from jose.teacher_setup import build_env_and_teacher, teacher_policy_module
@@ -295,17 +305,56 @@ def main(env_cfg, agent_cfg):
     # cumulative_gradient_steps on a shared "compute spent" x-axis for learning-curve plots.
     cumulative_gradient_steps = training["gradient_steps"]
     log_event("phase2/complete", best_validation_mse=training["best_validation_mse"])
-    closed_loop = evaluate_estimator_closed_loop(
-        env,
-        adapter,
-        teacher_agent,
-        estimator,
-        args_cli.estimator,
-        window,
-        args_cli.eval_episodes,
-        args_cli.max_episode_steps,
-        args_cli.seed + args_cli.eval_seed_offset,
-    )
+    locomotion = uses_locomotion_eval(adapter)
+
+    def evaluate(round_index: int) -> dict:
+        """Closed-loop metrics for one round, task-appropriate.
+
+        The episode-based evaluation always runs: it owns `episode_length_mean`,
+        which the ablation catalog requires, plus the survival columns. On the
+        locomotion task those saturate, so the command grid runs as well and
+        supplies the numbers that actually separate estimators.
+        """
+        result = evaluate_estimator_closed_loop(
+            env,
+            adapter,
+            teacher_agent,
+            estimator,
+            args_cli.estimator,
+            window,
+            args_cli.eval_episodes,
+            args_cli.max_episode_steps,
+            args_cli.seed + args_cli.eval_seed_offset,
+        )
+        if locomotion:
+            result.update(
+                evaluate_locomotion_grid(
+                    env,
+                    adapter,
+                    teacher_agent,
+                    estimator,
+                    args_cli.estimator,
+                    window,
+                    settle_s=args_cli.grid_settle_s,
+                    measure_s=args_cli.grid_measure_s,
+                    seed=args_cli.seed + args_cli.eval_seed_offset,
+                )
+            )
+        return result
+
+    def round_score(result: dict) -> tuple:
+        """Ranking key for DAgger round selection, highest wins.
+
+        On ppo_walk `episode_length_mean` is pinned at the 1000-step ceiling and
+        `death_rate` at zero for any competent teacher, so leading with them
+        would reduce the choice to open-loop estimator RMSE -- a criterion the
+        task does not optimise. Command tracking leads there instead.
+        """
+        if locomotion:
+            return (-result["track_error_norm"], -result["death_rate"], -result["rmse"])
+        return (result["episode_length_mean"], -result["death_rate"], -result["rmse"])
+
+    closed_loop = evaluate(0)
     rounds = [{
         "round": 0,
         "dataset_size": len(dataset.targets),
@@ -321,11 +370,7 @@ def main(env_cfg, agent_cfg):
         "evaluation", round=0,
         **{key: value for key, value in closed_loop.items() if isinstance(value, (int, float))},
     )
-    best_score = (
-        closed_loop["episode_length_mean"],
-        -closed_loop["death_rate"],
-        -closed_loop["rmse"],
-    )
+    best_score = round_score(closed_loop)
     best_round = 0
     best_state = {name: value.detach().cpu().clone() for name, value in estimator.state_dict().items()}
     save_jose_checkpoint(output / "estimator_round_0.pt", estimator, adapter, args_cli.task, window, closed_loop)
@@ -394,17 +439,7 @@ def main(env_cfg, agent_cfg):
         )
         epoch_offset += args_cli.dagger_epochs
         cumulative_gradient_steps += training["gradient_steps"]
-        closed_loop = evaluate_estimator_closed_loop(
-            env,
-            adapter,
-            teacher_agent,
-            estimator,
-            args_cli.estimator,
-            window,
-            args_cli.eval_episodes,
-            args_cli.max_episode_steps,
-            args_cli.seed + args_cli.eval_seed_offset,
-        )
+        closed_loop = evaluate(round_index)
         rounds.append(
             {
                 "round": round_index,
@@ -425,7 +460,7 @@ def main(env_cfg, agent_cfg):
             "evaluation", round=round_index,
             **{key: value for key, value in closed_loop.items() if isinstance(value, (int, float))},
         )
-        score = (closed_loop["episode_length_mean"], -closed_loop["death_rate"], -closed_loop["rmse"])
+        score = round_score(closed_loop)
         if score > best_score:
             best_score = score
             best_round = round_index
@@ -433,9 +468,14 @@ def main(env_cfg, agent_cfg):
         save_jose_checkpoint(
             output / f"estimator_round_{round_index}.pt", estimator, adapter, args_cli.task, window, closed_loop
         )
+        outcome = (
+            f"track={closed_loop['track_error_norm']:.4f}"
+            if locomotion
+            else f"episode={closed_loop['episode_length_mean']:.1f}"
+        )
         print(
             f"  round={round_index}/{total_rounds} ratio={ratio:.2f} samples={len(dataset.targets):,} "
-            f"episode={closed_loop['episode_length_mean']:.1f} death={closed_loop['death_rate']:.1f}%"
+            f"{outcome} death={closed_loop['death_rate']:.1f}%"
         )
 
     estimator.load_state_dict(best_state)
@@ -530,7 +570,11 @@ def main(env_cfg, agent_cfg):
         f"  saved={output / 'best_estimator.pt'} best_round={best_round} "
         f"rmse={metrics['rmse']:.5f} r2={metrics['r2']:.4f}"
     )
-    log_event("complete", best_round=best_round, rmse=metrics["rmse"], episode_length=metrics["episode_length_mean"])
+    log_event(
+        "complete", best_round=best_round, rmse=metrics["rmse"],
+        episode_length=metrics["episode_length_mean"],
+        **({"track_error_norm": metrics["track_error_norm"]} if locomotion else {}),
+    )
     writer.close()
     env.close()
 
