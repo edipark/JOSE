@@ -42,6 +42,10 @@ class G1AmpEnvCfg(DirectRLEnvCfg):
     motion_file: str = MISSING
     reference_body = "pelvis"
     reset_strategy = "default"
+    # Excludes the last `reset_time_end_margin` seconds of the clip from random
+    # reset sampling. 0.0 preserves prior behavior everywhere except where a
+    # subclass overrides it.
+    reset_time_end_margin = 0.0
 
     # World +X velocity task reward. Disabled in the base/dance/jump task and
     # enabled by G1AmpWalkEnvCfg, matching SOLO's reward equation.
@@ -74,8 +78,13 @@ class G1AmpWalkEnvCfg(G1AmpEnvCfg):
 class G1AmpDanceEnvCfg(G1AmpEnvCfg):
     robot = G1_AMP_ROBOT_CFG.replace(soft_joint_pos_limit_factor=1.0)
     motion_file = os.path.join(MOTIONS_DIR, "G1_dance.npz")
-    reset_strategy = "random"
-    action_second_difference_penalty_weight = 0.1
+    reset_strategy = "default"
+    # G1_dance.npz is 10.02 s long; the inherited 20 s episode asked the policy
+    # to sustain a non-periodic clip for 2x its own length, the same fixed-point
+    # incentive that made the jump task collapse before its episode length was
+    # matched to its motion. 10 s also doubles reset-phase diversity per env.
+    episode_length_s = 10.0
+    action_second_difference_penalty_weight = 0.0
 
 
 
@@ -94,6 +103,13 @@ class G1AmpJumpEnvCfg(G1AmpEnvCfg):
     # a 0.194 s hop against the reference's 0.708 s flight. Keep this below 0.241.
     termination_height = 0.2
     action_second_difference_penalty_weight = 0.0
+    # G1_jump.npz cuts off mid-motion: at t=9.0s (the last frame) the pelvis is
+    # still rising at +0.61 m/s with joint speeds matching mid-jump, not settled.
+    # Resetting into that state handed the policy a combination of pose and
+    # momentum it otherwise never sees, and both of the height-deaths measured
+    # for agent_50000.pt at 4096-env scale were resets landing at 99.9%/100% of
+    # the clip. 0.25 s excludes that tail without touching real jump phases.
+    reset_time_end_margin = 0.25
     # A longer AMP window was tried here and did not work. The reasoning was that
     # the shared 4-step window spans only 60 ms, about 8% of one flight phase, so
     # the discriminator judges near-instantaneous poses and a short hop looks as

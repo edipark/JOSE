@@ -294,7 +294,8 @@ class G1AmpEnv(DirectRLEnv):
 
     def _sample_motion_reset(self, env_ids: torch.Tensor, start: bool = False):
         count = env_ids.shape[0]
-        times = np.zeros(count) if start else self._motion_loader.sample_times(count)
+        reset_duration = max(self._motion_loader.duration - self.cfg.reset_time_end_margin, 0.0)
+        times = np.zeros(count) if start else self._motion_loader.sample_times(count, duration=reset_duration)
         dof_pos, dof_vel, body_pos, body_rot, body_lin, body_ang = self._motion_loader.sample(count, times)
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] = body_pos[:, self.motion_ref_body_index] + self.scene.env_origins[env_ids]
