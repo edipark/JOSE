@@ -57,12 +57,14 @@ JOINT_SCOPE_EXPERIMENTS = (
     AblationExperiment("LSTM", 25, "upper"),
 )
 # How much the on-policy DAgger phase is worth over the supervised warm start
-# alone. rounds=0 stops after the warm start, so its metrics.rounds holds just
-# the round-0 record -- that arm is the "no DAgger" baseline.
-DAGGER_EXPERIMENTS = (
-    AblationExperiment("LSTM", 25, "all", 10),
-    AblationExperiment("LSTM", 25, "all", 5),
-    AblationExperiment("LSTM", 25, "all", 0),
+# alone, at every round count from 0 (warm start only) to 10. Each arm is a
+# genuinely independent run, not a readout of round K from the 10-round run:
+# the estimator_ratio schedule in train_state_estimator.py divides progress by
+# dagger_rounds itself, so round 3 of a 3-round run (ratio -> 1.0, its last
+# round) and round 3 of a 10-round run (ratio ~= 0.84, still ramping) collect
+# on-policy data under different estimator_ratio and are not comparable.
+DAGGER_EXPERIMENTS = tuple(
+    AblationExperiment("LSTM", 25, "all", rounds) for rounds in range(10, -1, -1)
 )
 
 # Task registry shared by every ablation/comparison entry point: task key ->
@@ -278,6 +280,24 @@ class TeacherCatalog:
         return candidate
 
     @staticmethod
+    def _relocate_artifact(entry: Path, artifact: Path) -> Path:
+        """Rebuild an artifact path under ``entry`` when the recorded one is gone.
+
+        Records store the artifact as an absolute path, so a catalog copied from
+        another machine (or moved to another checkout) points every entry at a
+        directory that does not exist here and nothing is ever reused. The layout
+        below ``entry`` is fixed -- ``attempts/<run_id>/artifact/<file>`` -- so the
+        tail from ``attempts`` onwards is enough to find the file locally.
+        """
+        if artifact.is_file():
+            return artifact
+        parts = artifact.parts
+        if "attempts" not in parts:
+            return artifact
+        relocated = entry.joinpath(*parts[parts.index("attempts") :])
+        return relocated if relocated.is_file() else artifact
+
+    @staticmethod
     def read_complete(entry: Path, *, require_checkpoint: bool) -> dict | None:
         current = entry / "current.json"
         if not current.is_file():
@@ -287,9 +307,10 @@ class TeacherCatalog:
             record = payload["record"]
         except (OSError, KeyError, TypeError, json.JSONDecodeError):
             return None
-        artifact = Path(record.get("artifact") or "")
+        artifact = TeacherCatalog._relocate_artifact(entry, Path(record.get("artifact") or ""))
         if record.get("status") != "ok" or not artifact.is_file():
             return None
+        record = {**record, "artifact": str(artifact)}
         try:
             json.loads(artifact.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

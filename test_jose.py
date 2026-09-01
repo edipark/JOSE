@@ -504,8 +504,12 @@ def test_dagger_v2_checkpoint_round_trip(tmp_path):
 
 
 def test_dagger_rounds_are_distinguishable_and_existing_slugs_are_stable():
-    slugs = [experiment.slug for experiment in ablation_catalog.DAGGER_EXPERIMENTS]
+    experiments = ablation_catalog.DAGGER_EXPERIMENTS
+    slugs = [experiment.slug for experiment in experiments]
     assert len(set(slugs)) == len(slugs)
+    # 0 through 10, every round count, since a round-K readout from a single
+    # 10-round run is not the same experiment as an independent K-round run.
+    assert sorted(experiment.dagger_rounds for experiment in experiments) == list(range(11))
     # The default-rounds arm keeps the bare slug, so results already in the
     # catalog under that name stay addressable and keep grouping together.
     assert ablation_catalog.AblationExperiment("LSTM", 25, "all").slug == "lstm_w25_all"
@@ -599,6 +603,33 @@ def test_catalog_requires_complete_artifacts(tmp_path):
     assert ablation_catalog.TeacherCatalog.read_complete(entry, require_checkpoint=True) is None
     (artifact.parent / "best_estimator.pt").write_bytes(b"checkpoint")
     assert ablation_catalog.TeacherCatalog.read_complete(entry, require_checkpoint=True) == record
+
+
+def test_catalog_reuses_results_after_the_tree_moves(tmp_path):
+    """A catalog copied from another machine must still be reusable.
+
+    Records store the artifact as an absolute path, so before relocation every
+    entry in a copied tree pointed at a directory that does not exist locally
+    and the whole catalog silently re-trained.
+    """
+    entry = tmp_path / "entry"
+    artifact = entry / "attempts" / "run" / "artifact" / "training.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("{}", encoding="utf-8")
+    (artifact.parent / "best_estimator.pt").write_bytes(b"checkpoint")
+    stale = "/home/someone-else/checkout/entry/attempts/run/artifact/training.json"
+    record = {"status": "ok", "artifact": stale, "experiment": "lstm_w25_all", "metrics": {}}
+    ablation_catalog.TeacherCatalog.write_attempt(entry, "run", record, make_current=True)
+
+    found = ablation_catalog.TeacherCatalog.read_complete(entry, require_checkpoint=True)
+    assert found is not None
+    # The returned record carries the local path, so callers that open it work.
+    assert found["artifact"] == str(artifact)
+    # A path that cannot be rebuilt under the entry is still rejected.
+    missing = dict(record, artifact="/nowhere/attempts/run/artifact/training.json")
+    other = tmp_path / "other"
+    ablation_catalog.TeacherCatalog.write_attempt(other, "run", missing, make_current=True)
+    assert ablation_catalog.TeacherCatalog.read_complete(other, require_checkpoint=True) is None
 
 
 def test_complete_catalog_finalizes_study_without_rerunning(tmp_path):

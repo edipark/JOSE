@@ -65,12 +65,12 @@ agent:
   amp_observation_preprocessor_kwargs: null
   random_timesteps: 0
   learning_starts: 0
-  grad_norm_clip: 0.0
+  grad_norm_clip: 0.5
   ratio_clip: 0.2
   value_clip: 0.2
   entropy_loss_scale: 0.0
   value_loss_scale: 2.5
-  discriminator_loss_scale: 6.0
+  discriminator_loss_scale: 4.0
   amp_batch_size: 512
   # SKRL 2.x equivalent of the source G1's pure-AMP objective.
   task_reward_scale: 0.5

@@ -677,9 +677,9 @@ python -m jose.run_joint_scope_ablation \
 ### Measure what DAgger is worth
 
 JOSE trains in two phases: a supervised warm start on teacher-driven data, then
-on-policy DAgger rounds. This study varies only the number of DAgger rounds, so
-the `lstm_w25_all_r00` arm stops after the warm start and is the "no DAgger"
-baseline.
+on-policy DAgger rounds. This study varies the number of DAgger rounds from 0
+(the `lstm_w25_all_r00` arm, which stops after the warm start -- the "no
+DAgger" baseline) through 10, one arm per round count.
 
 ```bash
 python -m jose.run_dagger_ablation \
@@ -688,11 +688,21 @@ python -m jose.run_dagger_ablation \
   --headless
 ```
 
-The 10-round arm keeps the plain `lstm_w25_all` slug, so it is reused from the
-catalog if another study already ran it -- only the 5- and 0-round arms actually
-train. Read the result from `dagger_learning_curve.png`: the middle panel is
-closed-loop episode length per round, which is what says whether the rounds
-helped. The top panel (validation MSE) does not track it.
+Each arm is a genuinely independent training run, not a readout of round K
+from the 10-round run. `train_state_estimator.py`'s on-policy mixing ratio
+ramps from 0.8 toward 1.0 as a fraction of *that run's own* round count
+(`train_state_estimator.py`'s round loop divides progress by that run's own
+`--dagger-rounds`), so round 3 of a 3-round run is that run's last round (ratio -> 1.0)
+while round 3 of a 10-round run is still mid-ramp (ratio ~= 0.84) -- they
+collect on-policy data under different conditions and are not the same
+experiment. This is why the study is 11 arms rather than 3 evaluation points
+read off one run.
+
+Only the 10-round arm keeps the plain `lstm_w25_all` slug, so it is reused
+from the catalog if `architecture` or `joint_scope` already ran it; the other
+ten always train. Read the result from `dagger_learning_curve.png`: the middle
+panel is closed-loop episode length per round, which is what says whether the
+rounds helped. The top panel (validation MSE) does not track it.
 
 To run only one experiment, pass its canonical name:
 
