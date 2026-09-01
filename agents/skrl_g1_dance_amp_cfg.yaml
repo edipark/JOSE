@@ -70,7 +70,7 @@ agent:
   value_clip: 0.2
   entropy_loss_scale: 0.0
   value_loss_scale: 2.5
-  discriminator_loss_scale: 4.0
+  discriminator_loss_scale: 3.0
   amp_batch_size: 512
   # SKRL 2.x equivalent of the source G1's pure-AMP objective.
   task_reward_scale: 0.5
