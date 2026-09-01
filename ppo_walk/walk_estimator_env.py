@@ -35,3 +35,21 @@ class G1WalkEstimatorEnv(ManagerBasedRLEnv):
         """Simulator joint positions and velocities plus their canonical names."""
         data = self.robot.data
         return data.joint_pos, data.joint_vel, tuple(data.joint_names)
+
+    def get_distillation_sensor_state(self) -> dict[str, torch.Tensor]:
+        """Expose deployable joint/IMU quantities, mirroring ``G1AmpEnv``'s contract.
+
+        ``root_ang_vel_b`` and ``projected_gravity_b`` are already body-frame
+        quantities computed by :class:`ArticulationData`, unlike the Direct-workflow
+        AMP env which derives them from ``body_ang_vel_w`` via ``quat_apply_inverse``
+        -- same values, cheaper path here.
+        """
+        data = self.robot.data
+        return {
+            "joint_position": data.joint_pos,
+            "joint_velocity": data.joint_vel,
+            "previous_action": self.action_manager.action,
+            "quaternion_wxyz": data.root_quat_w,
+            "angular_velocity": data.root_ang_vel_b,
+            "projected_gravity": data.projected_gravity_b,
+        }

@@ -640,7 +640,7 @@ python -m jose.play_history_student \
 
 ## Ablation studies
 
-All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test. `--task` accepts `amp_walk`, `amp_dance`, `amp_jump`, or `ppo_walk` for `run_architecture_ablation.py`/`run_window_ablation.py`/`run_joint_scope_ablation.py`/`run_dagger_ablation.py` (default `amp_walk`); `run_method_comparison.py` only covers the three AMP tasks.
+All ablation studies need a teacher checkpoint. The default runs can take a long time. Use `--dry-run` to check the run plan or `--fast` for a smaller test. `--task` accepts `amp_walk`, `amp_dance`, `amp_jump`, or `locomotion` for `run_architecture_ablation.py`/`run_window_ablation.py`/`run_joint_scope_ablation.py`/`run_dagger_ablation.py` (default `amp_walk`); `run_method_comparison.py` covers all four tasks via `--case walk|dance|jump|locomotion <checkpoint>`.
 
 ### Compare estimator architectures
 
@@ -712,10 +712,14 @@ the checkpoint; nothing else about the command changes:
 
 ```bash
 python -m jose.run_architecture_ablation \
-  --task ppo_walk \
+  --task locomotion \
   --teacher-checkpoint logs/rsl_rl/isaac_g1_ppo_walk_estimator_jose_v0/<run>/model_<n>.pt \
   --headless
 ```
+
+`locomotion` is the catalog key (see ablation_catalog.py); the underlying
+adapter is still `ppo_walk`, which is what `--adapter` expects everywhere else
+in this document.
 
 The report it writes is not the AMP one, because the AMP columns do not separate
 anything here. A competent walk teacher survives all 1000 steps of every episode,
@@ -994,7 +998,7 @@ python -m jose.tools.smoke_test \
   --headless
 ```
 
-Available smoke-test tasks are `amp_walk`, `amp_dance`, `amp_jump`, and `ppo_walk`. Run one task per process because Isaac Sim uses one simulation context.
+Available smoke-test tasks are `amp_walk`, `amp_dance`, `amp_jump`, and `locomotion`. Run one task per process because Isaac Sim uses one simulation context.
 
 Run the Python tests:
 
