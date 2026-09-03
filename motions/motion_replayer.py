@@ -27,6 +27,34 @@ parser.add_argument(
     help="Length in physics steps (default: one complete motion)",
 )
 parser.add_argument("--video-dir", default=None)
+parser.add_argument("--video-width", type=int, default=1280)
+parser.add_argument("--video-height", type=int, default=720)
+parser.add_argument("--video-fps", type=int, default=30)
+parser.add_argument(
+    "--track-camera",
+    action="store_true",
+    help="Keep the camera centered on the reference root while replaying",
+)
+parser.add_argument(
+    "--camera-offset",
+    type=float,
+    nargs=3,
+    metavar=("X", "Y", "Z"),
+    default=(3.2, 3.2, 2.2),
+    help="World-space camera offset from the reference root when --track-camera is set",
+)
+parser.add_argument(
+    "--camera-lookat-height",
+    type=float,
+    default=0.25,
+    help="Vertical look-at offset from the reference root when --track-camera is set",
+)
+parser.add_argument(
+    "--video-codec",
+    default="libx264",
+    choices=("libx264", "h264_nvenc"),
+    help="FFmpeg encoder used by imageio. h264_nvenc is substantially faster when available.",
+)
 parser.add_argument("--matplotlib", action="store_true", help="Also show the motion skeleton in matplotlib")
 parser.add_argument("--print-base-velocity", action="store_true")
 parser.add_argument("--print-base-velocity-interval", type=int, default=30)
@@ -43,6 +71,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.envs import ViewerCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from jose.g1_cfg import G1_JOSE_CFG
 from jose.motions.motion_loader import MotionLoader
@@ -61,6 +90,8 @@ def _rgb_frame(annotator):
 def main():
     if args_cli.speed <= 0.0:
         raise ValueError("--speed must be positive")
+    if args_cli.video_width <= 0 or args_cli.video_height <= 0 or args_cli.video_fps <= 0:
+        raise ValueError("Video width, height, and FPS must be positive")
     motion = MotionLoader(args_cli.motion, args_cli.device, expected_dof_names=G1_JOINT_NAMES)
     sim = sim_utils.SimulationContext(
         sim_utils.SimulationCfg(dt=1.0 / 120.0, device=args_cli.device, render_interval=1)
@@ -76,15 +107,19 @@ def main():
     scene_cfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.0)
     scene_cfg.robot = G1_JOSE_CFG.replace(prim_path="/World/Robot")
     scene = InteractiveScene(scene_cfg)
-    ground_cfg = sim_utils.CuboidCfg(
-        size=(100.0, 100.0, 0.1),
-        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="max", static_friction=1.0, dynamic_friction=1.0, restitution=0.0
-        )
+    # Match the world rendered by play.py's G1 AMP environments.
+    spawn_ground_plane(
+        prim_path="/World/ground",
+        cfg=GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="max",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            )
+        ),
     )
-    ground_cfg.func("/World/ground", ground_cfg, translation=(0.0, 0.0, -0.05))
-    light_cfg = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.75, 0.75, 0.75))
+    light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
     light_cfg.func("/World/Light", light_cfg)
     sim.reset()
     robot = scene["robot"]
@@ -120,24 +155,35 @@ def main():
         viewer = MotionViewer(args_cli.motion, render_scene=True)
         threading.Thread(target=viewer.show, daemon=True).start()
 
-    video_writer = annotator = render_product = replicator = None
+    video_writer = annotator = render_product = None
+    render_product_path = None
     video_path = None
     if args_cli.video:
         import imageio.v2 as imageio
         import omni.replicator.core as rep
 
-        replicator = rep
         video_dir = Path(args_cli.video_dir or Path(args_cli.motion).resolve().parent / "videos")
         video_dir.mkdir(parents=True, exist_ok=True)
         video_path = video_dir / f"{Path(args_cli.motion).stem}.mp4"
-        video_writer = imageio.get_writer(video_path, fps=30, codec="libx264", quality=8)
-        render_product = rep.create.render_product("/OmniverseKit_Persp", (1280, 720))
+        writer_kwargs = {"fps": args_cli.video_fps, "codec": args_cli.video_codec}
+        if args_cli.video_codec == "h264_nvenc":
+            # Isaac Sim's bundled imageio-ffmpeg binary exposes h264_nvenc but
+            # omits the usual rate-control flags. Use the encoder defaults and
+            # optionally normalize quality with the system FFmpeg afterwards.
+            writer_kwargs["quality"] = None
+        else:
+            writer_kwargs["quality"] = 8
+        video_writer = imageio.get_writer(video_path, **writer_kwargs)
+        render_product = rep.create.render_product(
+            "/OmniverseKit_Persp", (args_cli.video_width, args_cli.video_height)
+        )
+        render_product_path = render_product if isinstance(render_product, str) else render_product.path
         annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
-        annotator.attach([render_product])
+        annotator.attach([render_product_path])
 
     loop = step = 0
     current_time = 0.0
-    capture_every = max(1, round(1.0 / (sim.get_physics_dt() * 30.0)))
+    capture_every = max(1, round(1.0 / (sim.get_physics_dt() * args_cli.video_fps)))
     try:
         while simulation_app.is_running() and (args_cli.loops == 0 or loop < args_cli.loops):
             if args_cli.video and step >= video_length:
@@ -158,11 +204,20 @@ def main():
             robot.write_joint_state_to_sim(
                 dof_pos[:, dof_ids], dof_vel[:, dof_ids] * args_cli.speed, None, env_ids,
             )
+            if args_cli.track_camera:
+                root_position = body_pos[0, root_id].detach().cpu().numpy()
+                camera_eye = root_position + np.asarray(args_cli.camera_offset)
+                camera_lookat = root_position + np.asarray((0.0, 0.0, args_cli.camera_lookat_height))
+                sim.set_camera_view(camera_eye, camera_lookat)
             scene.write_data_to_sim()
+            capture_frame = video_writer is not None and step % capture_every == 0
+            # Hydra/Replicator requires continuous render updates. Skipping the
+            # intermediate 120 Hz updates makes the next RGB readback slower
+            # because it has to catch up the render graph in one call.
             sim.step(render=True)
             scene.update(sim.get_physics_dt())
             recorder.record_frame(step)
-            if video_writer is not None and step % capture_every == 0:
+            if capture_frame:
                 frame = _rgb_frame(annotator)
                 if frame is not None:
                     video_writer.append_data(frame)
@@ -185,14 +240,14 @@ def main():
         if args_cli.record_output:
             recorder.stop_recording()
             recorder.save_data(args_cli.record_output)
-        if annotator is not None and render_product is not None:
+        if annotator is not None and render_product_path is not None:
             try:
-                annotator.detach([render_product])
+                annotator.detach([render_product_path])
             except Exception as exc:
                 print(f"[WARNING] Could not detach RGB annotator: {exc}")
-        if replicator is not None and render_product is not None:
+        if render_product is not None and not isinstance(render_product, str):
             try:
-                replicator.destroy.render_product(render_product)
+                render_product.destroy()
             except Exception as exc:
                 print(f"[WARNING] Could not destroy render product: {exc}")
         if video_writer is not None:
