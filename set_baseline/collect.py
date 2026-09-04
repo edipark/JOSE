@@ -35,6 +35,7 @@ from __future__ import annotations
 import torch
 
 from jose.estimator.adapters import PolicyAdapter
+from jose.distillation.command_eval import reset_ids
 from jose.estimator.pipeline import HistoryBuffer, RolloutDataset
 from jose.skrl_compat import force_skrl_isaaclab_reset
 
@@ -118,7 +119,7 @@ def collect_expert_rollout(
             observation_history.reset(done)
             privileged_history.reset(done)
             if corruptor is not None:
-                corruptor.reset(done)
+                corruptor.reset(reset_ids(done))
             previous_target = previous_target.clone()
             previous_target[done] = 0.0
 

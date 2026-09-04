@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 from jose.estimator.adapters import PolicyAdapter
+from jose.distillation.command_eval import reset_ids
 from jose.estimator.metrics import MetricAccumulator, step_metrics
 from jose.estimator.pipeline import HistoryBuffer, frozen_rng
 from jose.skrl_compat import force_skrl_isaaclab_reset
@@ -123,7 +124,7 @@ def evaluate_set_closed_loop(
             history.reset(done)
             estimator.reset(done)
             if getattr(adapter, "imu_corruptor", None) is not None:
-                adapter.imu_corruptor.reset(done)
+                adapter.imu_corruptor.reset(reset_ids(done))
             previous_action[done] = 0.0
             if len(completed_lengths) >= episodes:
                 break

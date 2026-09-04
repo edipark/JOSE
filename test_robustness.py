@@ -176,3 +176,25 @@ def test_resolve_skips_set_when_no_set_study_is_given():
 def test_resolve_rejects_an_unknown_method():
     with pytest.raises(KeyError):
         registry.resolve("nope", Path("/study"), None, 42)
+
+
+def test_corruptor_reset_takes_indices_not_a_boolean_mask():
+    """The three sensor-reset call sites must convert before calling.
+
+    ``SensorCorruptor.reset`` sizes its fresh bias and latency draws with
+    ``len(ids)``. Handed a boolean mask that is the environment count long, it
+    draws one row per environment and tries to scatter them into however many
+    environments actually reset -- a shape error when some reset, and silently
+    wrong when all of them do. ``ObservationHistory.reset`` tolerates a mask, so
+    nothing nearby fails first and the mistake looks safe.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    offenders = []
+    for name in ("set_baseline/collect.py", "set_baseline/evaluate.py", "robustness/methods.py"):
+        for line in (root / name).read_text(encoding="utf-8").splitlines():
+            if re.search(r"corruptor\.reset\(", line) and "reset_ids(" not in line:
+                offenders.append(f"{name}: {line.strip()}")
+    assert not offenders, "reset called with an unconverted mask:\n  " + "\n  ".join(offenders)

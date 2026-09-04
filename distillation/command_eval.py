@@ -99,7 +99,7 @@ def build_frame_fn(
     return frame
 
 
-def _reset_ids(dones: torch.Tensor | None) -> torch.Tensor | None:
+def reset_ids(dones: torch.Tensor | None) -> torch.Tensor | None:
     """Index tensor for the environments that just reset.
 
     ``CommandEvaluator`` passes a boolean mask (and an all-ones mask right after
@@ -141,7 +141,7 @@ def build_student_policy(
         return action_normalizer.denormalize(student(observation_normalizer.normalize(flattened)))
 
     def on_step(dones: torch.Tensor) -> None:
-        ids = _reset_ids(dones)
+        ids = reset_ids(dones)
         if ids is None or ids.numel() == 0:
             return
         history.reset(ids)

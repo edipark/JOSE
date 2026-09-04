@@ -28,6 +28,7 @@ from pathlib import Path
 import torch
 
 from jose.distillation.command_eval import build_frame_fn, build_student_policy
+from jose.distillation.command_eval import reset_ids
 from jose.distillation.history import HistoryMLPStudent, ObservationHistory
 from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, SensorCorruptor
 from jose.estimator.models import RunningNormalizer
@@ -195,7 +196,7 @@ def load_set(adapter, teacher_agent, path: Path, device, num_envs: int, imu_scal
         if dones is not None and dones.any():
             history.reset(dones)
             estimator.reset(dones)
-            corruptor.reset(dones)
+            corruptor.reset(reset_ids(dones))
 
     return act, on_step, {
         "checkpoint": str(path), "context": context, "estimator": "SET",

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from jose.distillation.command_eval import _reset_ids
+from jose.distillation.command_eval import reset_ids
 from jose.set_baseline.collect import pack
 from jose.set_baseline.model import SETEstimator
 from jose.set_baseline.targets import PASS_THROUGH, describe, split
@@ -153,7 +153,7 @@ def test_reset_clears_only_the_selected_environments():
 
 def test_reset_ids_converts_a_boolean_mask_to_indices():
     """SensorCorruptor.reset sizes its draws with len(ids); a mask would be wrong."""
-    ids = _reset_ids(torch.tensor([True, False, True]))
+    ids = reset_ids(torch.tensor([True, False, True]))
     assert ids.tolist() == [0, 2] and len(ids) == 2
-    assert _reset_ids(None) is None
-    assert _reset_ids(torch.tensor([1, 2])).tolist() == [1, 2]
+    assert reset_ids(None) is None
+    assert reset_ids(torch.tensor([1, 2])).tolist() == [1, 2]
