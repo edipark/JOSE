@@ -113,7 +113,10 @@ TEACHER_IMPLEMENTATION = (
 )
 TASK_IMPLEMENTATION = {
     "amp_walk": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_walk.npz", "agents/skrl_g1_walk_amp_cfg.yaml"),
-    "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
+    # G1AmpDanceEnvCfg loads G1_dance1.npz as of "Dance config modified"
+    # (f6f06c8). Hashing the file the environment does not read would leave the
+    # dance fingerprint blind to a change in the motion it actually trains on.
+    "amp_dance": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_dance1.npz", "agents/skrl_g1_dance_amp_cfg.yaml"),
     "amp_jump": ("__init__.py", "g1_cfg.py", "motions/motion_loader.py", "motions/G1_jump.npz", "agents/skrl_g1_jump_amp_cfg.yaml"),
     "locomotion": (
         "__init__.py",
