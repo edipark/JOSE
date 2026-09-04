@@ -1,5 +1,9 @@
 """Open-loop error for SET, evaluated in chunks.
 
+The evaluation batch is sized at run time from what is actually free, and
+never falls back to the CPU: a silent device switch would put a CPU timing into
+``inference_ms_per_sample`` beside GPU ones with nothing marking it.
+
 ``estimator/pipeline.py``'s ``evaluate_predictions`` pushes the whole validation
 set through the model in a single forward pass. That is fine for the LSTM, whose
 activations are one hidden state per sample, and fatal for SET, which expands
@@ -70,6 +74,11 @@ def auto_chunk(estimator, device: str) -> int:
     """
     if not str(device).startswith("cuda") or not torch.cuda.is_available():
         return MAX_CHUNK
+    # mem_get_info reports what the driver sees free, which does not include
+    # blocks PyTorch is holding in its cache. Releasing them first is the
+    # difference between sizing against real headroom and against whatever the
+    # allocator happened to keep.
+    torch.cuda.empty_cache()
     free, _total = torch.cuda.mem_get_info(torch.device(device).index or 0)
     per_sample = peak_bytes_per_sample(estimator)
     fits = int(free * SAFETY / per_sample)
@@ -96,26 +105,41 @@ def evaluate_predictions_chunked(
     if chunk is None:
         chunk = auto_chunk(estimator, device)
 
-    def run(target_device: str) -> tuple[torch.Tensor, float]:
+    def run(target_device: str, size: int) -> tuple[torch.Tensor, float]:
         estimator.to(target_device)
         outputs = []
         started = time.perf_counter()
-        for begin in range(0, len(inputs), chunk):
-            outputs.append(estimator.predict(inputs[begin : begin + chunk].to(target_device)).cpu())
+        for begin in range(0, len(inputs), size):
+            outputs.append(estimator.predict(inputs[begin : begin + size].to(target_device)).cpu())
         return torch.cat(outputs), time.perf_counter() - started
 
-    try:
-        prediction, elapsed = run(device)
-    except torch.OutOfMemoryError:
-        # This evaluation is pure dataset regression -- it needs no simulator and
-        # no particular device. Falling back beats losing a finished model: the
-        # run dies here *after* training, and nothing has been saved yet. Costs a
-        # couple of minutes on 250k samples and keeps the script portable to a
-        # card whose free memory we did not measure.
-        torch.cuda.empty_cache()
-        print("[set] open-loop evaluation ran out of GPU memory; falling back to CPU", flush=True)
-        prediction, elapsed = run("cpu")
-        estimator.to(device)
+    # The batch above is sized from an activation estimate, and estimates are
+    # wrong sometimes. Being wrong here is expensive: this evaluation runs
+    # *after* training and before anything is saved, so an unhandled OOM throws
+    # the model away. Halving costs seconds.
+    #
+    # There is deliberately no CPU fallback. A silent device switch would make
+    # inference_ms_per_sample a CPU number sitting in a column of GPU ones, with
+    # nothing in the output to say so. At MIN_CHUNK the pass needs about 18 MB,
+    # so exhausting the loop means something other than this batch is wrong, and
+    # that should be read rather than worked around.
+    prediction = elapsed = None
+    while chunk >= MIN_CHUNK:
+        try:
+            prediction, elapsed = run(device, chunk)
+            break
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            chunk //= 2
+            print(f"[set] open-loop batch too large; retrying at {chunk}", flush=True)
+    if prediction is None:
+        free = torch.cuda.mem_get_info(torch.device(device).index or 0)[0] if torch.cuda.is_available() else 0
+        raise RuntimeError(
+            f"Open-loop evaluation ran out of memory even at batch {MIN_CHUNK} "
+            f"({free / 2**20:.0f} MiB free, {peak_bytes_per_sample(estimator) / 1024:.0f} KB/sample). "
+            "Something other than the evaluation batch is holding the GPU -- check for a "
+            "second run sharing the card, and lower --num-envs if there is not."
+        )
 
     error = prediction - dataset.targets
     mse = error.square().mean(dim=0)
