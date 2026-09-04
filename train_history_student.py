@@ -45,6 +45,15 @@ parser.add_argument(
     help="Rollout steps per evaluation call (default: the task's own max episode length, "
     "so evaluation reaches the same natural episode boundary as the teacher)",
 )
+parser.add_argument(
+    "--grid-settle-s", type=float, default=1.0,
+    help="Locomotion command grid: settling seconds before measurement (ppo_walk only). "
+    "Matches train_state_estimator.py so every method's tracking numbers are comparable.",
+)
+parser.add_argument(
+    "--grid-measure-s", type=float, default=4.0,
+    help="Locomotion command grid: measured seconds per command (ppo_walk only)",
+)
 parser.add_argument("--save-interval", type=int, default=50)
 parser.add_argument("--gyro-noise-std", type=float, default=0.015)
 parser.add_argument("--gyro-bias-std", type=float, default=0.01)
@@ -83,27 +92,20 @@ from jose.distillation.history import (
     JOINT_FRAME_DIM,
     HistoryMLPStudent,
     ObservationHistory,
-    build_imu_frame,
-    build_joint_frame,
+)
+from jose.distillation.command_eval import (
+    build_frame_fn,
+    build_student_policy,
+    evaluate_student_command_grid,
 )
 from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, SensorCorruptor
 from jose.estimator.adapters import make_policy_adapter
 from jose.estimator.metrics import MetricAccumulator, step_metrics
 from jose.estimator.models import ReplayBuffer, RunningNormalizer
-from jose.estimator.pipeline import evaluate_paired_motion_fidelity
+from jose.estimator.pipeline import evaluate_paired_motion_fidelity, uses_locomotion_eval
 from jose.schema import SCHEMA_VERSION
 from jose.teacher_setup import build_env_and_teacher
 from jose.skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
-
-
-def _sensor_state(core) -> dict[str, torch.Tensor]:
-    if not hasattr(core, "get_distillation_sensor_state"):
-        raise RuntimeError("Task does not implement the JOSE distillation sensor contract")
-    state = core.get_distillation_sensor_state()
-    forbidden = {"base_linear_velocity", "linear_acceleration"}.intersection(state)
-    if forbidden:
-        raise RuntimeError(f"Deploy student was exposed to forbidden features: {sorted(forbidden)}")
-    return state
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -166,30 +168,11 @@ def main(env_cfg, agent_cfg):
     best_iteration = 0
     best_state: dict | None = None
     fidelity: dict = {}
+    command_metrics: dict = {}
 
-    def frame(use_corruption: bool = True) -> torch.Tensor:
-        state = _sensor_state(core)
-        if args_cli.method == "joint_only":
-            return build_joint_frame(state["joint_position"], state["joint_velocity"], state["previous_action"])
-        quaternion = state["quaternion_wxyz"]
-        # q and -q represent the same attitude. Random sign changes make that
-        # invariance explicit in the simulator-to-LowState training contract.
-        if use_corruption:
-            signs = torch.where(
-                torch.rand(quaternion.shape[0], 1, device=quaternion.device) < 0.5,
-                -torch.ones(1, device=quaternion.device),
-                torch.ones(1, device=quaternion.device),
-            )
-            quaternion = quaternion * signs
-        observation = imu_spec.observe(quaternion, state["angular_velocity"], timestamp_s=0.0)
-        if not observation.valid:
-            raise RuntimeError(f"Simulation IMU adapter fault: {observation.fault.value}")
-        gyro, gravity = observation.angular_velocity, observation.projected_gravity
-        if use_corruption:
-            gyro, gravity = corruptor(gyro, gravity)
-        return build_imu_frame(
-            state["joint_position"], state["joint_velocity"], state["previous_action"], gyro, gravity
-        )
+    # Built by distillation/command_eval.py so eval_distillation_grid.py feeds a
+    # restored checkpoint exactly what training fed it.
+    frame = build_frame_fn(core, args_cli.method, imu_spec, corruptor)
 
     def payload(iteration: int) -> dict:
         return {
@@ -360,9 +343,13 @@ def main(env_cfg, agent_cfg):
             student.load_state_dict(best_state)
         student.eval()
 
-        def student_policy(_observations: torch.Tensor) -> torch.Tensor:
-            flattened = history.push(frame(True))
-            return action_normalizer.denormalize(student(observation_normalizer.normalize(flattened)))
+        # Shared with eval_distillation_grid.py so a back-filled run and a fresh
+        # one measure the identical policy: normalize, forward, denormalize, with
+        # the history (and the IMU corruptor) reset in step with the environment.
+        student_policy, on_reset_ids = build_student_policy(
+            student, history, observation_normalizer, action_normalizer,
+            lambda: frame(True), extra_resets=(corruptor.reset,),
+        )
 
         def reset_student_state() -> None:
             history.reset()
@@ -372,6 +359,18 @@ def main(env_cfg, agent_cfg):
             env, adapter, teacher_agent, student_policy,
             seed=args_cli.seed, horizon=args_cli.mpjpe_horizon, on_reset=reset_student_state,
         )
+        # Command tracking. Episode length and death rate pin to their ceilings
+        # on this task for any competent policy, so they separate nothing; this
+        # is the column that does, and it is what puts this run in the same
+        # report table as the teacher and JOSE (reporting.py dispatches on
+        # `track_error_norm`). AMP tasks have no velocity command and skip it.
+        if uses_locomotion_eval(adapter):
+            reset_student_state()
+            command_metrics = evaluate_student_command_grid(
+                env, adapter, student_policy, on_reset_ids,
+                settle_s=args_cli.grid_settle_s, measure_s=args_cli.grid_measure_s,
+                seed=args_cli.seed,
+            )
     finally:
         writer.close()
         env.close()
@@ -384,7 +383,7 @@ def main(env_cfg, agent_cfg):
         "metrics": {
             **best_metrics, "best_iteration": best_iteration,
             "total_gradient_steps": cumulative_gradient_steps, "learning_curve": learning_curve,
-            **fidelity,
+            **fidelity, **command_metrics,
         },
         "evaluations": evaluations,
         "method": args_cli.method,

@@ -1,12 +1,28 @@
 """Estimator-compatible variant of the G1 29-DOF walk environment.
 
-This is :mod:`walk_env_cfg` with exactly one change: the *policy* observation
-group carries a **noiseless** ``base_lin_vel`` term. The base walk task adds
-observation noise to it, which is right for a policy that will be handed a
-learned estimate; here the term is the privileged quantity the estimator is
-trained to reproduce, so it must be clean. Rewards, actions, commands, events,
-terminations and every algorithm hyperparameter are inherited unchanged, so this
-variant automatically tracks the base task's reward set.
+This is :mod:`walk_env_cfg` with two changes, both about observation noise.
+
+First, the *policy* observation group carries a **noiseless** ``base_lin_vel``
+term. The base walk task adds observation noise to it, which is right for a
+policy that will be handed a learned estimate; here the term is the privileged
+quantity the estimator is trained to reproduce, so it must be clean.
+
+Second, ``enable_corruption`` is **off**. The same argument applies to the other
+two estimated terms: ``base_ang_vel`` and ``projected_gravity`` are estimator
+targets too, and ``estimator/adapters.py`` overwrites their entire history block
+at injection time. JOSE therefore never reads their corrupted values while the
+teacher baseline does -- an asymmetry that let the student outscore the teacher
+it distils from. With corruption off, teacher and student read the same
+observations and the only difference between them is true versus estimated base
+state. It also matches the AMP tasks, whose observations carry no noise at all.
+Sensor noise belongs in the robustness experiments, which apply it deliberately
+and measure the result, not in the main comparison. The per-term ``noise=``
+arguments below are left in place: they are inert while corruption is off and
+they document the noise model the teacher was trained under.
+
+Rewards, actions, commands, events, terminations and every algorithm
+hyperparameter are inherited unchanged, so this variant automatically tracks the
+base task's reward set.
 
 Do not reorder or resize this group. :data:`jose.schema.PPO_WALK_OBSERVATION_SCHEMA`
 hardcodes the resulting 495-D layout --
@@ -46,7 +62,7 @@ class EstimatorPolicyCfg(ObsGroup):
 
     def __post_init__(self):
         self.history_length = 5
-        self.enable_corruption = True
+        self.enable_corruption = False
         self.concatenate_terms = True
 
 

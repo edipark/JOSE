@@ -75,10 +75,15 @@ def aggregate(rows: list[dict]) -> list[dict]:
                 summary[f"{metric}_std"] = stdev(values) if len(values) > 1 else 0.0
                 summary[f"{metric}_ci95"] = 1.96 * summary[f"{metric}_std"] / math.sqrt(len(values))
         output.append(summary)
+    # The ablation runner names this arm "teacher_gt"; run_method_comparison.py
+    # names it "PrivilegedTeacher". Both are the same frozen teacher measured the
+    # same way, and missing one silently blanks every "vs teacher" column in a
+    # method-comparison report.
+    TEACHER_ARMS = ("teachergt", "teacher_gt", "privilegedteacher")
     teacher_lengths = {
         (row["task"], row["teacher_id"]): row["episode_length_mean_mean"]
         for row in output
-        if row["experiment"].lower() in ("teachergt", "teacher_gt")
+        if row["experiment"].lower() in TEACHER_ARMS
         and row.get("episode_length_mean_mean", 0.0) > 0.0
     }
     # Same join for command tracking: how much worse each method follows the
@@ -88,7 +93,7 @@ def aggregate(rows: list[dict]) -> list[dict]:
     teacher_tracking = {
         (row["task"], row["teacher_id"]): row
         for row in output
-        if row["experiment"].lower() in ("teachergt", "teacher_gt")
+        if row["experiment"].lower() in TEACHER_ARMS
         and "track_error_norm_mean" in row
     }
     for row in output:

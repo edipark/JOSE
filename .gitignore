@@ -6,3 +6,7 @@ build/
 logs/
 outputs/
 motions/videos/
+# Git cannot re-include a path whose parent directory is excluded, so the
+# directory is not excluded -- its contents are, with the scripts exempted.
+figures/*
+!figures/*.py

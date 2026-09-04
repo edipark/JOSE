@@ -296,7 +296,7 @@ def main(env_cfg, agent_cfg):
 
     training = train_estimator(
         estimator, dataset, args_cli.estimator, args_cli.epochs, args_cli.batch_size,
-        args_cli.lr, args_cli.device, epoch_logger,
+        args_cli.lr, args_cli.device, epoch_logger, seed=args_cli.seed,
     )
     epoch_offset += args_cli.epochs
     # Counts optimizer steps, not epochs, so it lines up with train_history_student.py's
@@ -434,6 +434,7 @@ def main(env_cfg, agent_cfg):
             args_cli.lr * 0.5,
             args_cli.device,
             dagger_epoch_logger,
+            seed=args_cli.seed * 1000 + round_index,
         )
         epoch_offset += args_cli.dagger_epochs
         cumulative_gradient_steps += training["gradient_steps"]

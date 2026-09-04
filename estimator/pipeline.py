@@ -541,11 +541,18 @@ def _fit_model(
     learning_rate: float,
     device: str,
     epoch_callback: Callable[[dict], None] | None = None,
+    seed: int = 0,
 ) -> dict:
     model.to(device)
     size = len(targets)
     validation_size = max(1, min(size // 10, 10000))
-    order = torch.randperm(size)
+    # A local generator, not the global RNG. The split and the per-epoch shuffle
+    # must depend only on `seed`, never on how much randomness was drawn before
+    # this call -- otherwise a dataset cache *hit* (no rollout collection, so no
+    # `torch.randperm` in `collect_rollout`) and a cache *miss* consume different
+    # amounts of the global stream and fit different weights from identical data.
+    generator = torch.Generator().manual_seed(int(seed))
+    order = torch.randperm(size, generator=generator)
     validation_ids, training_ids = order[:validation_size], order[validation_size:]
     if len(training_ids) == 0:
         raise ValueError("At least two samples are required for training")
@@ -555,7 +562,7 @@ def _fit_model(
     gradient_steps = 0
     for epoch in range(epochs):
         model.train()
-        permutation = training_ids[torch.randperm(len(training_ids))]
+        permutation = training_ids[torch.randperm(len(training_ids), generator=generator)]
         train_total = 0.0
         for start in range(0, len(permutation), batch_size):
             ids = permutation[start : start + batch_size]
@@ -592,13 +599,15 @@ def train_estimator(
     learning_rate: float = 1.0e-3,
     device: str = "cuda:0",
     epoch_callback: Callable[[dict], None] | None = None,
+    seed: int = 0,
 ) -> dict:
     inputs = dataset.frames if estimator_type.upper() == "MLP" else dataset.histories
     estimator.to(inputs.device)
     estimator.set_normalization(inputs, dataset.targets)
     normalized_targets = estimator.normalized_targets(dataset.targets)
     return _fit_model(
-        estimator, inputs, normalized_targets, epochs, batch_size, learning_rate, device, epoch_callback
+        estimator, inputs, normalized_targets, epochs, batch_size, learning_rate, device,
+        epoch_callback, seed,
     )
 
 

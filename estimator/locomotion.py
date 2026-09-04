@@ -32,10 +32,28 @@ import torch
 #: Both feet. Resolves to ``left_ankle_roll_link`` and ``right_ankle_roll_link``.
 FEET_BODIES = ".*ankle_roll.*"
 
-# (vx [m/s], vy [m/s], yaw rate [rad/s]) -- the required minimum evaluation set.
+# (vx [m/s], vy [m/s], yaw rate [rad/s]) -- the evaluation set.
+#
+# The task samples commands from vx 0..1, vy +-0.5, yaw +-1 (see
+# ``ppo_walk/walk_env_cfg.py``). The first eight rows below are a low-speed
+# interior subset that tops out at 60%/40%/30% of those ranges, which left the
+# outer half of the command distribution unmeasured: a policy that loses
+# authority only at high yaw rate or full forward speed scored the same as one
+# that did not. The remaining rows pin each axis at its range limit and add two
+# combined commands, so the reported tracking error covers the distribution the
+# policy was actually trained on.
+#
+# The original eight are kept verbatim and first so the per-command breakdown
+# stays comparable with runs logged before the set was widened.
+#
 # The zero command is first and is load-bearing: it is the only row that exposes
 # a policy that marches in place or creeps when told to stand still.
+#
+# Cost is linear in the row count and small: each row runs
+# ``--grid-settle-s`` + ``--grid-measure-s`` (1 s + 4 s) across all environments
+# at once, so the full set is well under two minutes of simulated time.
 EVAL_COMMANDS = [
+    # -- interior, unchanged ------------------------------------------------
     (0.0, 0.0, 0.0),
     (0.3, 0.0, 0.0),
     (0.6, 0.0, 0.0),
@@ -44,6 +62,15 @@ EVAL_COMMANDS = [
     (0.0, 0.0, 0.3),
     (0.0, 0.0, -0.3),
     (0.4, 0.2, 0.2),
+    # -- range limits, one axis at a time -----------------------------------
+    (1.0, 0.0, 0.0),
+    (0.0, 0.5, 0.0),
+    (0.0, -0.5, 0.0),
+    (0.0, 0.0, 1.0),
+    (0.0, 0.0, -1.0),
+    # -- combined, where axes compete for foot placement --------------------
+    (0.8, -0.3, 0.6),
+    (1.0, 0.0, 1.0),
 ]
 
 #: Per-axis normalisers for :func:`summarize`, one per command axis, taken from the
