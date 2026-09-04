@@ -55,6 +55,12 @@ parser.add_argument("--eval-seed-offset", type=int, default=1000)
 parser.add_argument("--mpjpe-horizon", type=int, default=100)
 parser.add_argument("--grid-settle-s", type=float, default=1.0)
 parser.add_argument("--grid-measure-s", type=float, default=4.0)
+parser.add_argument(
+    "--imu-noise-scale", type=float, default=0.0,
+    help="Multiplier on the nominal IMU model, applied to SET's own sensor input "
+         "during collection and evaluation. 0 reproduces the published method; "
+         "anything else is the randomized arm and is ours, not SET's.",
+)
 parser.add_argument("--output-dir", default="logs/jose_g1/set_baseline")
 parser.add_argument("--run-name", default="artifact")
 AppLauncher.add_app_launcher_args(parser)
@@ -110,7 +116,21 @@ def main(env_cfg, agent_cfg):
         args_cli.teacher_checkpoint, args_cli.device, seed=args_cli.seed,
     )
     teacher_agent.enable_training_mode(False, apply_to_models=True)
-    adapter = SETPolicyAdapter(make_policy_adapter(args_cli.adapter, env, "all"))
+    imu_corruptor = None
+    if args_cli.imu_noise_scale > 0.0:
+        from jose.distillation.imu import SensorCorruptionCfg, SensorCorruptor
+        from jose.robustness.noise import scaled_imu_cfg
+
+        # The same nominal model the distillation students recorded, so the two
+        # hardened arms on this axis were hardened against the same sensor.
+        imu_corruptor = SensorCorruptor(
+            args_cli.num_envs, args_cli.device,
+            scaled_imu_cfg(SensorCorruptionCfg(), args_cli.imu_noise_scale),
+        )
+        print(f"[set] IMU randomization at {args_cli.imu_noise_scale}x nominal", flush=True)
+    adapter = SETPolicyAdapter(
+        make_policy_adapter(args_cli.adapter, env, "all"), imu_corruptor=imu_corruptor
+    )
     locomotion = uses_locomotion_eval(adapter)
 
     estimated, pass_through = set_targets.split(adapter.name())
@@ -203,6 +223,26 @@ def main(env_cfg, agent_cfg):
             )
         )
 
+    # A pass-through dimension is copied from the sensor, not regressed, so its
+    # closed-loop error is identically zero -- unless the value SET copied is not
+    # the value the sensor actually held at that step. A frozen or stale sensor
+    # read is exactly that, and it is otherwise nearly invisible: the validation
+    # loss barely moves, because the fit is made and scored on the same degenerate
+    # inputs, while deployment collapses because the policy is handed a constant
+    # attitude. Deliberate IMU randomization breaks the invariant on purpose, so
+    # the check is skipped there.
+    if pass_through and args_cli.imu_noise_scale == 0.0:
+        leaked = {
+            index: round(metrics["target_rmse"][index], 6)
+            for index in pass_through
+            if metrics["target_rmse"][index] != 0.0
+        }
+        if leaked:
+            raise RuntimeError(
+                "Pass-through dimensions must have exactly zero error; got "
+                f"{leaked}. SET copied something other than the live sensor read."
+            )
+
     metrics["parameters"] = sum(parameter.numel() for parameter in estimator.parameters())
     metrics["best_validation_mse"] = training["best_validation_mse"]
     metrics["total_gradient_steps"] = training["gradient_steps"]
@@ -232,6 +272,7 @@ def main(env_cfg, agent_cfg):
                     "seed": args_cli.seed,
                     "num_envs": args_cli.num_envs,
                     "collect_steps": args_cli.collect_steps,
+                    "imu_noise_scale": args_cli.imu_noise_scale,
                     "max_dataset_size": args_cli.max_dataset_size,
                     "epochs": args_cli.epochs,
                 },

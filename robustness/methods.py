@@ -134,13 +134,25 @@ def load_jose(adapter, teacher_agent, path: Path, device, num_envs: int):
     return act, on_step, {"checkpoint": str(path), "window": window, "estimator": config["type"]}
 
 
-def load_set(adapter, teacher_agent, path: Path, device, num_envs: int):
+def load_set(adapter, teacher_agent, path: Path, device, num_envs: int, imu_scale: float = 0.0):
     """The SET baseline: joints + IMU in, privileged state out.
 
     ``adapter`` must already be a :class:`SETPolicyAdapter`, since SET's input is
-    wider than JOSE's. The IMU it reads is the environment's, so SET has no noise
-    scale of its own -- the published method has no IMU randomization and we do
-    not add one. On the IMU axis it is therefore the un-randomized curve.
+    wider than JOSE's.
+
+    SET publishes no IMU randomization and we add none, so on the IMU axis it is
+    the un-randomized arm -- but un-randomized describes its *training*, not its
+    test. It is degraded at evaluation exactly as the clean-trained distillation
+    student is, and against the same physical noise, because the axis asks how a
+    method behaves when its sensor goes bad and a method handed a clean sensor is
+    not on the axis at all. On locomotion this matters twice over: SET does not
+    merely read the IMU, it passes all six of those dimensions straight through
+    into the teacher's observation, so a clean pass-through would make the sweep
+    measure nothing.
+
+    The base model is the default :class:`SensorCorruptionCfg`, which is the one
+    the distillation students recorded, so a given level is the same physical
+    noise for every method that reads an IMU.
     """
     from jose.set_baseline.model import SETEstimator
 
@@ -160,6 +172,10 @@ def load_set(adapter, teacher_agent, path: Path, device, num_envs: int):
     estimator.load_state_dict(checkpoint["model_state_dict"])
     estimator.eval()
 
+    corruptor = SensorCorruptor(num_envs, device, scaled_imu_cfg(SensorCorruptionCfg(), imu_scale))
+    adapter.imu_corruptor = corruptor
+    adapter.invalidate_imu()
+
     context = config["context"]
     history = HistoryBuffer(num_envs, context, adapter.input_dim, device)
     has_pass_through = bool(config["pass_through_indices"])
@@ -173,8 +189,15 @@ def load_set(adapter, teacher_agent, path: Path, device, num_envs: int):
         return adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
 
     def on_step(dones) -> None:
+        # Every step, not only on a reset: this is what makes the step's two IMU
+        # consumers share one sensor read rather than drawing two.
+        adapter.invalidate_imu()
         if dones is not None and dones.any():
             history.reset(dones)
             estimator.reset(dones)
+            corruptor.reset(dones)
 
-    return act, on_step, {"checkpoint": str(path), "context": context, "estimator": "SET"}
+    return act, on_step, {
+        "checkpoint": str(path), "context": context, "estimator": "SET",
+        "eval_imu_scale": imu_scale,
+    }

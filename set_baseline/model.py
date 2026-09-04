@@ -15,7 +15,21 @@ non-privileged history alone. We implement the pair-token reading -- prediction
 of ``o'_t`` conditioned on ``o_{t-H+1..t}`` and ``o'_{t-H+1..t-1}`` -- because the
 deployment section describes generation as autoregressive, which only means
 something if past ``o'`` are inputs. The resulting ``2H`` token count is our
-reading; the paper does not state a sequence length.
+reading; the paper states ``H = 20`` timesteps (Alg. 1 samples an ``H``-long
+``(o, o', t)``) but never the token count those timesteps expand to.
+
+Two further points, checked against the paper rather than assumed. Its own
+target is ``o' = (h, v)`` -- body height and linear velocity -- so it estimates
+only what no sensor reports. Our locomotion teacher consumes nine dimensions, six
+of which the IMU measures directly, so SET here estimates the three velocity
+components and passes the other six through. Different arity, same rule.
+
+And the paper applies **no noise of any kind to the estimator's own inputs**:
+the dataset is trajectories of the final policy collected with ground-truth
+privileged observations. It says as much about the consequence, attributing a
+lower real-world jump success rate to a longer observation horizon "which makes
+it more sensitive to real-world noise". Our ``set`` arm reproduces that. The
+randomized arm is ours and is labelled as such.
 
 What the paper fixes: **6 blocks**, **H = 20**, **MSE**. Everything else --
 model width, head count, feed-forward ratio, dropout, optimizer, learning rate,

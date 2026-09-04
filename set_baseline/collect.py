@@ -81,7 +81,12 @@ def collect_expert_rollout(
     teacher_agent.enable_training_mode(False, apply_to_models=True)
     per_step = num_envs if max_samples is None else max(1, min(num_envs, max_samples // max(steps, 1)))
 
+    corruptor = getattr(adapter, "imu_corruptor", None)
+
     for _ in range(steps):
+        # One sensor read per step. Harmless when the adapter is not corrupting.
+        if corruptor is not None:
+            adapter.invalidate_imu()
         frame = adapter.estimator_input()
         target = adapter.estimator_target()
         # Push the *previous* target: slot -1 of the privileged history holds
@@ -112,6 +117,8 @@ def collect_expert_rollout(
             lengths[done] = 0.0
             observation_history.reset(done)
             privileged_history.reset(done)
+            if corruptor is not None:
+                corruptor.reset(done)
             previous_target = previous_target.clone()
             previous_target[done] = 0.0
 

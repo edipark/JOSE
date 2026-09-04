@@ -50,11 +50,24 @@ FOOT_TOKEN = "ankle_roll"
 class SETPolicyAdapter(PolicyAdapter):
     """A :class:`PolicyAdapter` whose estimator input is SET's ``o``."""
 
-    def __init__(self, base: PolicyAdapter):
+    def __init__(self, base: PolicyAdapter, imu_corruptor=None):
         # Wrap rather than re-derive: the base adapter already resolved the joint
         # ids, the schema and the core env, and it owns the injection logic whose
         # index bookkeeping we must not duplicate.
         self._base = base
+        # Evaluation-time IMU degradation. None during training and in the clean
+        # condition; the sensor-robustness sweep supplies one so that SET is
+        # degraded on the IMU axis exactly as the distillation students are.
+        # SET publishes no IMU randomization, which is a statement about its
+        # training and not a licence to hand it a clean sensor at test time.
+        self.imu_corruptor = imu_corruptor
+        # One physical sensor read per step. ``estimator_input`` and
+        # ``pass_through_values`` both consume the IMU, and the corruptor is
+        # stateful -- it carries a per-episode bias and a latency queue -- so
+        # calling it twice would advance that queue twice and draw two
+        # independent samples of what is one measurement. The cache is cleared
+        # once per environment step by ``invalidate_imu``.
+        self._imu_cache = None
         self.env = base.env
         self.core_env = base.core_env
         self.joint_preset = base.joint_preset
@@ -97,6 +110,23 @@ class SETPolicyAdapter(PolicyAdapter):
     def input_dim(self) -> int:
         return self.estimator_input().shape[-1]
 
+    def invalidate_imu(self) -> None:
+        """Drop the cached sensor read. Call once per environment step."""
+        self._imu_cache = None
+
+    def _imu(self, state) -> tuple[torch.Tensor, torch.Tensor]:
+        # No corruptor, no cache: the cache exists only so that the step's two
+        # consumers share one *noisy* draw. Caching the clean read as well would
+        # make a caller that never invalidates -- collection, SET's own
+        # evaluator -- reuse the first step's IMU for the whole run.
+        if self.imu_corruptor is None:
+            return state["angular_velocity"], state["projected_gravity"]
+        if self._imu_cache is None:
+            self._imu_cache = self.imu_corruptor(
+                state["angular_velocity"], state["projected_gravity"]
+            )
+        return self._imu_cache
+
     def pass_through_values(self) -> torch.Tensor | None:
         """Target dimensions SET reads instead of estimating, in target order.
 
@@ -108,8 +138,11 @@ class SETPolicyAdapter(PolicyAdapter):
         if not measured:
             return None
         state = self.core_env.get_distillation_sensor_state()
+        angular_velocity, projected_gravity = self._imu(state)
+        reading = {"angular_velocity": angular_velocity, "projected_gravity": projected_gravity}
         return torch.stack(
-            [state[key][:, component] for _, (key, component) in sorted(measured.items())], dim=-1
+            [reading.get(key, state.get(key))[:, component]
+             for _, (key, component) in sorted(measured.items())], dim=-1
         )
 
     def estimator_input(self) -> torch.Tensor:
@@ -119,10 +152,11 @@ class SETPolicyAdapter(PolicyAdapter):
             raise RuntimeError(f"SET was exposed to forbidden features: {sorted(forbidden)}")
         joint_position = state["joint_position"]
         batch = joint_position.shape[0]
+        angular_velocity, projected_gravity = self._imu(state)
         return torch.cat(
             (
-                state["angular_velocity"],
-                state["projected_gravity"],
+                angular_velocity,
+                projected_gravity,
                 joint_position,
                 state["joint_velocity"],
                 self._feet_in_body_frame(),

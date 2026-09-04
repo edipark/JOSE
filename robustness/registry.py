@@ -30,6 +30,7 @@ METHOD_SPECS: dict[str, tuple[str, str | None]] = {
     "imu_dr": ("student", "imu_based_distillation"),
     "set": ("set", "set"),
     "set_enc": ("set_enc", "set_encoder_noise"),
+    "set_imu_dr": ("set", "set_imu_noise"),
 }
 
 #: Arms that saw noise during training, paired with the arm that did not.
@@ -41,22 +42,28 @@ RANDOMIZATION_PAIRS: dict[str, str] = {
     "imu_clean_enc": "imu_clean",
     "set_enc": "set",
     "imu_dr": "imu_clean",
+    "set_imu_dr": "set",
 }
 
 #: What each axis can actually move.
 #:
 #: IMU axis -- ``imu_dr`` trained against a noisy IMU and ``imu_clean`` did not,
-#: which is the randomization pair. JOSE and the joint-only student read no IMU,
-#: so their curves are flat by construction and are stated in the paper rather
-#: than simulated. The teacher is measured despite having no IMU either, so that
-#: flat line is checked rather than asserted.
+#: which is the randomization pair, and ``set_imu_dr`` is SET collected against
+#: the same noisy IMU. Both methods that read an IMU are hardened, for the reason
+#: the encoder axis hardens everything: a gap between a treated arm and an
+#: untreated one shows which arm got the treatment, not which method tolerates a
+#: bad sensor. JOSE and the joint-only student read no IMU,
+#: so they are flat by construction; they are measured anyway, because a bar the
+#: reader can see should come from a run and not from an argument, and because a
+#: flatness that is asserted is a flatness nobody checked. The teacher is
+#: measured for the same reason.
 #:
 #: Encoder axis -- everything reads joints, so everything moves, the teacher
 #: included, and its curve is the ceiling. Every trained method appears twice,
 #: SET included: hardening some arms and not others would show which arm got the
 #: treatment rather than which method tolerates bad encoders.
 AXIS_METHODS: dict[str, tuple[str, ...]] = {
-    "imu": ("teacher", "imu_dr", "imu_clean", "set"),
+    "imu": ("teacher", "jose", "joint_only", "imu_clean", "set", "imu_dr", "set_imu_dr"),
     "encoder": (
         "teacher",
         "jose", "jose_enc",

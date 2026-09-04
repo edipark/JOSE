@@ -83,6 +83,8 @@ def evaluate_set_closed_loop(
 
     max_steps = max_episode_steps * max(1, (episodes + num_envs - 1) // num_envs + 1)
     for _ in range(max_steps):
+        if getattr(adapter, "imu_corruptor", None) is not None:
+            adapter.invalidate_imu()
         frame = adapter.estimator_input()
         target = adapter.estimator_target()
         sequence = history.push(frame)
@@ -120,6 +122,8 @@ def evaluate_set_closed_loop(
             lengths[done_ids] = 0.0
             history.reset(done)
             estimator.reset(done)
+            if getattr(adapter, "imu_corruptor", None) is not None:
+                adapter.imu_corruptor.reset(done)
             previous_action[done] = 0.0
             if len(completed_lengths) >= episodes:
                 break

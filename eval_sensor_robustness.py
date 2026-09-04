@@ -176,7 +176,8 @@ def main(env_cfg, agent_cfg):
                         )
                     elif kind in ("set", "set_enc"):
                         act, on_step, info = load_set(
-                            adapter, teacher_agent, checkpoint, device, args_cli.num_envs
+                            adapter, teacher_agent, checkpoint, device, args_cli.num_envs,
+                            imu_scale,
                         )
                     else:
                         act, on_step, info = load_student(
