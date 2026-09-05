@@ -60,11 +60,11 @@ ROBUSTNESS_DIR = os.path.join(
 ARMS = [
     ("jose", "JOSE"),
     ("joint_only", "Joint-\nonly"),
-    ("imu_clean", "IMU\ndist."),
+    ("imu_clean", "Distill."),
     ("set", "SET"),
     ("jose_enc", "JOSE\n$+$ DR"),
     ("joint_only_enc", "Joint-only\n$+$ DR"),
-    ("imu_clean_enc", "IMU dist.\n$+$ DR"),
+    ("imu_clean_enc", "Distill.\n$+$ DR"),
     ("set_enc", "SET\n$+$ DR"),
 ]
 #: Where the randomized block starts; the axis opens a gap there so the two
@@ -73,9 +73,14 @@ BLOCK_SPLIT = 4
 BLOCK_GAP = 0.55
 
 SCALES = (1.0, 2.0)
-#: Shared with fig_imu_robustness, so a noise level is the same shade in both.
-SCALE_COLOURS = {1.0: "#DFD0EE", 2.0: "#A67FC8"}
-SCALE_EDGES = {1.0: "#7E52AD", 2.0: "#A67FC8"}
+#: A green lightness ramp, the same hue family plot_window.py gives the
+#: locomotion task. Both
+#: degradation figures measure only that task, so hue names the task here
+#: exactly as it does in the sweeps, and lightness is left free to carry the
+#: one ordered quantity these figures vary. A saturated second hue would have
+#: implied a second category that does not exist.
+SCALE_COLOURS = {1.0: "#CDE8C8", 2.0: "#2E7D32"}
+SCALE_EDGES = {1.0: "#2E7D32", 2.0: "#2E7D32"}
 SCALE_LABELS = {1.0: "nominal", 2.0: "$2\\times$ nominal"}
 
 FIGURE_SIZE = (3.4, 3.7)

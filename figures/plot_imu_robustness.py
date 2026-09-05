@@ -57,9 +57,9 @@ ROBUSTNESS_DIR = os.path.join(
 METHODS = [
     ("jose", "JOSE"),
     ("joint_only", "Joint-\nonly"),
-    ("imu_clean", "IMU\ndist."),
+    ("imu_clean", "Distill."),
     ("set", "SET"),
-    ("imu_dr", "IMU dist.\n$+$ DR"),
+    ("imu_dr", "Distill.\n$+$ DR"),
     ("set_imu_dr", "SET\n$+$ DR"),
 ]
 #: Where the randomized block starts, matching fig_robustness. Both methods that
@@ -73,15 +73,16 @@ BLOCK_GAP = 0.55
 #: three unrelated categories. Light to dark is the direction a reader assumes
 #: for less to more, so a group that darkens upward is a method that degrades.
 SCALES = (1.0, 2.0, 4.0)
-SCALE_COLOURS = {1.0: "#DFD0EE", 2.0: "#A67FC8", 4.0: "#653D8F"}
-SCALE_EDGES = {1.0: "#7E52AD", 2.0: "#A67FC8", 4.0: "#653D8F"}
+SCALE_COLOURS = {1.0: "#CDE8C8", 2.0: "#5FA463", 4.0: "#1B5E20"}
+SCALE_EDGES = {1.0: "#1B5E20", 2.0: "#5FA463", 4.0: "#1B5E20"}
 SCALE_LABELS = {1.0: "nominal", 2.0: "$2\\times$ nominal", 4.0: "$4\\times$ nominal"}
 
 FIGURE_SIZE = (3.4, 3.7)
 BAR_WIDTH = 0.26
+#: (metric key, axis label, limits, whether to print values on the bars)
 METRICS = (
-    ("survival", "Survival (%)", (0, 112)),
-    ("track", "Command RMSE", (0, 0.78)),
+    ("survival", "Survival (%)", (0, 118), True),
+    ("track", "Command RMSE", (0, 0.78), False),
 )
 
 
@@ -119,7 +120,7 @@ def arm_positions() -> np.ndarray:
     return positions
 
 
-def panel(axis, sweeps, key, ylabel, ylim) -> None:
+def panel(axis, sweeps, key, ylabel, ylim, annotate) -> None:
     positions = arm_positions()
     for offset, scale in enumerate(SCALES):
         for slot, (method, _label) in enumerate(METHODS):
@@ -137,6 +138,13 @@ def panel(axis, sweeps, key, ylabel, ylim) -> None:
             )
             axis.errorbar(x, centre, yerr=error, color="#1A1A1A", elinewidth=0.5,
                           capsize=1.4, capthick=0.5, zorder=4)
+            if annotate:
+                # Above the whisker, not above the bar: on the arms with real
+                # seed spread the two collide otherwise.
+                top = centre + float(error[1][0])
+                axis.text(x, top + 0.035 * (ylim[1] - ylim[0]), f"{centre:.0f}",
+                          ha="center", va="bottom", fontsize=5,
+                          fontweight="bold", color="#1A1A1A")
 
     axis.set_xticks(positions)
     axis.set_xticklabels([label for _method, label in METHODS], fontsize=5.5)
@@ -151,11 +159,11 @@ def panel(axis, sweeps, key, ylabel, ylim) -> None:
 
 def plot(sweeps, out: str, dpi: int) -> None:
     figure, axes = plt.subplots(len(METRICS), 1, figsize=FIGURE_SIZE, squeeze=False)
-    for row, (key, ylabel, ylim) in enumerate(METRICS):
+    for row, (key, ylabel, ylim, annotate) in enumerate(METRICS):
         axis = axes[row][0]
         # Labelled on both panels: the reader should not have to carry the
         # positions down from one panel to the other.
-        panel(axis, sweeps, key, ylabel, ylim)
+        panel(axis, sweeps, key, ylabel, ylim, annotate)
         axis.text(0.0, 1.02, f"({'ab'[row]}) {ylabel.split(' (')[0]}",
                   transform=axis.transAxes, va="bottom")
 

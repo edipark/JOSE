@@ -42,7 +42,11 @@ ABLATION_ROOT = os.path.join(
 # colour blindness.
 TASKS = [
     ("amp_walk", "Walk", "#0072B2"),
-    ("amp_dance", "Dance", "#CC79A7"),
+    # Okabe-Ito's reddish purple darkened from #CC79A7, which sits at 2.6:1
+    # against white -- readable as a fill, thin as a 1 pt line. The hue is
+    # unchanged, so the colour-blind separation the palette provides is intact
+    # and only the contrast moves.
+    ("amp_dance", "Dance", "#B03A75"),
     ("amp_jump", "Jump", "#D55E00"),
     ("locomotion", "Locomotion", "#009E73"),
 ]
