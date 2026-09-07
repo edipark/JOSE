@@ -51,8 +51,13 @@ import torch  # noqa: E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 import isaaclab_tasks  # noqa: F401, E402
 
-from jose.distillation.command_eval import evaluate_student_command_grid  # noqa: E402
 from jose.estimator.adapters import make_policy_adapter  # noqa: E402
+from jose.estimator.locomotion import (  # noqa: E402
+    CommandEvaluator,
+    EVAL_COMMANDS,
+    resolve_feet_cfgs,
+    summarize,
+)
 from jose.robustness.methods import (  # noqa: E402
     load_jose,
     load_set,
@@ -77,6 +82,43 @@ def _version(name: str) -> str | None:
         return metadata.version(name)
     except metadata.PackageNotFoundError:
         return None
+
+
+def _evaluate_command_grid(
+    env,
+    adapter,
+    act,
+    on_step,
+    *,
+    settle_s: float,
+    measure_s: float,
+    command_seed_base: int,
+) -> dict:
+    """Run the standard grid with reset seeds isolated inside this worker.
+
+    Keeping this helper local makes the friction experiment independent of
+    changes to the repository's shared evaluator API.  Re-seeding immediately
+    before each command reset prevents earlier policy/sensor RNG consumption
+    from changing a later command's initial condition.
+    """
+    core = adapter.core_env
+    feet_sensor_cfg, feet_asset_cfg = resolve_feet_cfgs(core.scene)
+    evaluator = CommandEvaluator(
+        env,
+        feet_sensor_cfg,
+        feet_asset_cfg,
+        settle_steps=int(round(settle_s / core.step_dt)),
+        measure_steps=int(round(measure_s / core.step_dt)),
+    )
+    saved = evaluator._saved_command_cfg()
+    results = {}
+    try:
+        for index, command in enumerate(EVAL_COMMANDS):
+            _seed_everything(command_seed_base + index)
+            results[str(command)] = evaluator.run(act, command, on_step=on_step)
+    finally:
+        evaluator._restore_command_cfg(saved)
+    return summarize(results)
 
 
 def _validate_args() -> None:
@@ -176,14 +218,13 @@ def main(env_cfg, agent_cfg) -> None:
                         core, checkpoint, device, args_cli.num_envs, imu_scale=0.0
                     )
 
-            metrics = evaluate_student_command_grid(
+            metrics = _evaluate_command_grid(
                 env,
                 adapter,
                 act,
                 on_step,
                 settle_s=args_cli.grid_settle_s,
                 measure_s=args_cli.grid_measure_s,
-                seed=args_cli.eval_seed,
                 command_seed_base=command_seed_base,
             )
             row = {
