@@ -1,5 +1,9 @@
 """Deployment-safe history distillation components for JOSE."""
 
+from .command_eval import (  # noqa: F401
+    checkpoint_command_conditioning,
+    require_command_conditioning,
+)
 from .history import (
     DISTILLATION_WINDOW,
     IMU_FRAME_DIM,
@@ -25,6 +29,8 @@ __all__ = [
     "HistoryMLPStudent",
     "ObservationHistory",
     "build_imu_frame",
+    "checkpoint_command_conditioning",
+    "require_command_conditioning",
     "build_joint_frame",
     "IMUFault",
     "IMUObservation",

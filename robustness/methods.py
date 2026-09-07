@@ -27,7 +27,11 @@ from pathlib import Path
 
 import torch
 
-from jose.distillation.command_eval import build_frame_fn, build_student_policy
+from jose.distillation.command_eval import (
+    build_frame_fn,
+    build_student_policy,
+    require_command_conditioning,
+)
 from jose.distillation.command_eval import reset_ids
 from jose.distillation.history import HistoryMLPStudent, ObservationHistory
 from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, SensorCorruptor
@@ -72,15 +76,19 @@ def _student_checkpoint(path: Path, device, num_envs: int, imu_scale: float):
     trained_cfg = SensorCorruptionCfg(**checkpoint["sensor_corruption"])
     base = SensorCorruptionCfg(**{**checkpoint["sensor_corruption"], "enabled": True})
     corruptor = SensorCorruptor(num_envs, device, scaled_imu_cfg(base, imu_scale))
-    return method, student, history, observation_normalizer, action_normalizer, corruptor, trained_cfg
+    return method, student, history, observation_normalizer, action_normalizer, corruptor, trained_cfg, checkpoint
 
 
 def load_student(core, path: Path, device, num_envs: int, imu_scale: float):
     """The joint-only or IMU distillation baseline."""
-    method, student, history, obs_norm, act_norm, corruptor, trained = _student_checkpoint(
+    method, student, history, obs_norm, act_norm, corruptor, trained, checkpoint = _student_checkpoint(
         path, device, num_envs, imu_scale
     )
-    frame = build_frame_fn(core, method, IMUObservationSpec(), corruptor)
+    command_conditioned = checkpoint.get("adapter") == "ppo_walk"
+    require_command_conditioning(checkpoint, command_conditioned, str(path.name))
+    frame = build_frame_fn(
+        core, method, IMUObservationSpec(), corruptor, command_conditioned=command_conditioned
+    )
     # joint_only builds its frame from joint state alone, so the corruptor is
     # never consulted and imu_scale cannot affect it. That flatness is a result.
     act, on_step = build_student_policy(

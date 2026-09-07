@@ -33,7 +33,13 @@ from typing import Callable, Iterable, Sequence
 
 import torch
 
-from .history import build_imu_frame, build_joint_frame
+from .history import (
+    COMMAND_DIM,
+    build_imu_frame,
+    build_joint_frame,
+    checkpoint_command_conditioning,
+    require_command_conditioning,
+)
 
 
 def sensor_state(core) -> dict[str, torch.Tensor]:
@@ -57,6 +63,7 @@ def build_frame_fn(
     method: str,
     imu_spec=None,
     corruptor=None,
+    command_conditioned: bool = False,
 ) -> Callable[[bool], torch.Tensor]:
     """The per-step observation frame, identical for training and evaluation.
 
@@ -72,11 +79,30 @@ def build_frame_fn(
     if method == "imu" and imu_spec is None:
         raise ValueError("The imu method needs an IMUObservationSpec")
 
+    def command_of(state: dict) -> torch.Tensor | None:
+        """The velocity command, or ``None`` on a task that has no command.
+
+        Failing loudly here matters: a command-conditioned run that silently fell
+        back to ``None`` would train the very baseline this guard exists to stop.
+        """
+        if not command_conditioned:
+            return None
+        if "velocity_command" not in state:
+            raise RuntimeError(
+                "command_conditioned=True but the task exposes no 'velocity_command'; "
+                "the student would be imitating a command-conditioned teacher blind"
+            )
+        command = state["velocity_command"]
+        if command.shape[-1] != COMMAND_DIM:
+            raise RuntimeError(f"velocity_command must have {COMMAND_DIM} entries")
+        return command
+
     def frame(use_corruption: bool = True) -> torch.Tensor:
         state = sensor_state(core)
         if method == "joint_only":
             return build_joint_frame(
-                state["joint_position"], state["joint_velocity"], state["previous_action"]
+                state["joint_position"], state["joint_velocity"], state["previous_action"],
+                command_of(state),
             )
         quaternion = state["quaternion_wxyz"]
         if use_corruption:
@@ -93,7 +119,8 @@ def build_frame_fn(
         if use_corruption and corruptor is not None:
             gyro, gravity = corruptor(gyro, gravity)
         return build_imu_frame(
-            state["joint_position"], state["joint_velocity"], state["previous_action"], gyro, gravity
+            state["joint_position"], state["joint_velocity"], state["previous_action"], gyro, gravity,
+            command_of(state),
         )
 
     return frame

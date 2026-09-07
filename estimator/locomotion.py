@@ -79,9 +79,31 @@ EVAL_COMMANDS = [
 #: in m/s and ``yaw_rmse`` in rad/s, so their raw mean has no meaning.
 COMMAND_SCALES = (1.0, 0.5, 1.0)
 
+#: Largest normalised tracking error a command may show and still count as a
+#: success, given the robot also survived the whole measurement window.
+#: Expressed in the same units as ``track_error_norm``: the mean over axes of
+#: each axis RMSE divided by that axis's amplitude, so 0.25 is "off by a quarter
+#: of the command range". Fixed here from the structure of the command space
+#: rather than tuned against any measured result, so that a rerun cannot move it.
+TASK_SUCCESS_MAX_NORM_ERROR = 0.25
+
 
 def _mean(values: list[float]) -> float:
     return float(sum(values) / len(values)) if values else float("nan")
+
+
+def _mean_present(values: list) -> float | None:
+    """Mean over the entries that exist, or ``None`` when none do.
+
+    A command where every robot fell before the measurement window reports
+    ``None`` for its tracking fields. Averaging those in as NaN would take the
+    whole sweep down with them, and averaging them in as zero would score a
+    total failure as perfect tracking; dropping them and reporting how many were
+    dropped is the only honest option. Callers that need the sweep to be
+    complete should read ``commands_all_dead``.
+    """
+    present = [v for v in values if v is not None]
+    return float(sum(present) / len(present)) if present else None
 
 
 def resolve_feet_cfgs(scene):
@@ -223,6 +245,9 @@ class CommandEvaluator:
         # per-env accumulators over the measurement window
         alive = torch.ones(num_envs, dtype=torch.bool, device=device)
         fell = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        # Split so a caller can tell "never got going" from "lost it mid-measure".
+        fell_settling = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        fell_measuring = torch.zeros(num_envs, dtype=torch.bool, device=device)
         n_samples = torch.zeros(num_envs, device=device)
         sum_v = torch.zeros(num_envs, 3, device=device)  # vx, vy (yaw frame), yaw rate (base frame)
         sum_sq_err = torch.zeros(num_envs, 3, device=device)
@@ -254,12 +279,20 @@ class CommandEvaluator:
                 self._force_command(cmd)
 
                 measuring = step >= self.settle_steps
-                # an environment that terminated (fall) inside the window stops
-                # contributing samples; `dones` here includes time-outs, but the
-                # measurement window is short enough that none occur.
+                # A fall is recorded wherever it happens. Counting only inside
+                # the measurement window hid every settle-phase fall: the
+                # environment was still marked dead by `alive &= ~dones` below
+                # and silently stopped contributing samples, so a command that
+                # killed every robot during settle reported `fall_count` 0.
+                # `dones` here includes time-outs, but the window is short
+                # enough that none occur.
                 terminated = unwrapped.termination_manager.terminated
+                newly_fell = terminated & alive
+                fell |= newly_fell
                 if measuring:
-                    fell |= terminated & alive
+                    fell_measuring |= newly_fell
+                else:
+                    fell_settling |= newly_fell
                 alive &= ~dones
 
                 if not measuring:
@@ -311,42 +344,73 @@ class CommandEvaluator:
                 end_xy = torch.where(alive.unsqueeze(1), robot.data.root_pos_w[:, :2], end_xy)
 
         with torch.no_grad():
+            # `valid` is "contributed at least one sample", which includes an
+            # environment that fell after one step. Averaging over it alone is a
+            # survivor statistic: the RMSE of a robot that managed two frames
+            # carries the same weight as one that held the command for the whole
+            # window. `complete` is the honest denominator, and the two are
+            # reported side by side so a reader can see when they diverge.
             valid = n_samples > 0
+            complete = n_samples >= float(self.measure_steps)
+            n_valid = int(valid.sum())
             n = n_samples.clamp(min=1.0)
-            mean_v = (sum_v / n.unsqueeze(1))[valid]
-            rmse = torch.sqrt(sum_sq_err / n.unsqueeze(1))[valid]
+
+            scales = torch.tensor(COMMAND_SCALES, device=device, dtype=torch.float32)
+            rmse_all = torch.sqrt(sum_sq_err / n.unsqueeze(1))
+            norm_err_all = (rmse_all / scales).mean(dim=1)
+            # Task success demands both halves of the job: stay up for the whole
+            # measurement AND deliver the command. An environment that never
+            # contributed a sample fails by construction, since `complete` is
+            # false for it.
+            success = complete & (norm_err_all <= TASK_SUCCESS_MAX_NORM_ERROR)
+
+            mean_v = sum_v / n.unsqueeze(1)
             measure_s = self.measure_steps * self.dt
-            drift = (
-                torch.norm(end_xy - start_xy, dim=1)[valid]
+            drift_all = (
+                torch.norm(end_xy - start_xy, dim=1)
                 if start_xy is not None
-                else torch.zeros(1, device=device)
+                else torch.zeros(num_envs, device=device)
             )
+
+            def survivor_mean(values: torch.Tensor) -> float | None:
+                """Mean over contributing environments, or ``None`` if there are none.
+
+                Returning ``None`` rather than NaN keeps the JSON readable and
+                makes an all-dead command explicit downstream instead of
+                poisoning every aggregate that touches it.
+                """
+                return float(values[valid].mean()) if n_valid else None
 
             return {
                 "command": {"vx": cmd_tuple[0], "vy": cmd_tuple[1], "yaw": cmd_tuple[2]},
                 "measured": {
-                    "vx": float(mean_v[:, 0].mean()),
-                    "vy": float(mean_v[:, 1].mean()),
-                    "yaw": float(mean_v[:, 2].mean()),
+                    "vx": survivor_mean(mean_v[:, 0]),
+                    "vy": survivor_mean(mean_v[:, 1]),
+                    "yaw": survivor_mean(mean_v[:, 2]),
                 },
                 "error": {
-                    "vx_mean": float((mean_v[:, 0] - cmd[0]).mean()),
-                    "vy_mean": float((mean_v[:, 1] - cmd[1]).mean()),
-                    "yaw_mean": float((mean_v[:, 2] - cmd[2]).mean()),
-                    "vx_rmse": float(rmse[:, 0].mean()),
-                    "vy_rmse": float(rmse[:, 1].mean()),
-                    "yaw_rmse": float(rmse[:, 2].mean()),
+                    "vx_mean": survivor_mean(mean_v[:, 0] - cmd[0]),
+                    "vy_mean": survivor_mean(mean_v[:, 1] - cmd[1]),
+                    "yaw_mean": survivor_mean(mean_v[:, 2] - cmd[2]),
+                    "vx_rmse": survivor_mean(rmse_all[:, 0]),
+                    "vy_rmse": survivor_mean(rmse_all[:, 1]),
+                    "yaw_rmse": survivor_mean(rmse_all[:, 2]),
                 },
                 "survival_rate": float(alive.float().mean()),
+                "task_success_rate": float(success.float().mean()),
                 "fall_count": int(fell.sum()),
+                "settle_fall_count": int(fell_settling.sum()),
+                "measure_fall_count": int(fell_measuring.sum()),
                 "num_envs": int(num_envs),
-                "base_height_m": float((sum_height / n)[valid].mean()),
-                "feet_air_time_reward": float((sum_air_time_rew / n)[valid].mean()),
-                "feet_slide_penalty": float((sum_slide_pen / n)[valid].mean()),
-                "foot_lifts_per_s": float((lift_count[valid] / measure_s).mean()),
-                "double_stance_fraction": float((double_stance_steps / n)[valid].mean()),
-                "drift_m": float(drift.mean()),
-                "drift_speed_mps": float(drift.mean() / measure_s),
+                "num_contributing": n_valid,
+                "num_complete": int(complete.sum()),
+                "base_height_m": survivor_mean(sum_height / n),
+                "feet_air_time_reward": survivor_mean(sum_air_time_rew / n),
+                "feet_slide_penalty": survivor_mean(sum_slide_pen / n),
+                "foot_lifts_per_s": survivor_mean(lift_count / measure_s),
+                "double_stance_fraction": survivor_mean(double_stance_steps / n),
+                "drift_m": survivor_mean(drift_all),
+                "drift_speed_mps": survivor_mean(drift_all / measure_s),
                 "double_stance_air_reward_violations": double_stance_reward_violations,
                 "max_air_reward_in_double_stance": max_air_reward_in_double_stance,
             }
@@ -405,29 +469,49 @@ def summarize(results: dict) -> dict:
         raise ValueError("summarize() needs at least one evaluated command")
 
     axis_rmse = {
-        axis: _mean([row["error"][f"{axis}_rmse"] for row in rows]) for axis in ("vx", "vy", "yaw")
+        axis: _mean_present([row["error"][f"{axis}_rmse"] for row in rows])
+        for axis in ("vx", "vy", "yaw")
     }
     metrics = {f"track_{axis}_rmse": value for axis, value in axis_rmse.items()}
     metrics.update(
-        {f"track_{axis}_bias": _mean([row["error"][f"{axis}_mean"] for row in rows]) for axis in ("vx", "vy", "yaw")}
+        {
+            f"track_{axis}_bias": _mean_present([row["error"][f"{axis}_mean"] for row in rows])
+            for axis in ("vx", "vy", "yaw")
+        }
     )
-    metrics["track_error_norm"] = _mean(
-        [axis_rmse[axis] / scale for axis, scale in zip(("vx", "vy", "yaw"), COMMAND_SCALES)]
+    metrics["track_error_norm"] = _mean_present(
+        [
+            None if axis_rmse[axis] is None else axis_rmse[axis] / scale
+            for axis, scale in zip(("vx", "vy", "yaw"), COMMAND_SCALES)
+        ]
     )
     for name in ("foot_lifts_per_s", "double_stance_fraction", "feet_air_time_reward", "feet_slide_penalty"):
-        metrics[name] = _mean([row[name] for row in rows])
+        metrics[name] = _mean_present([row[name] for row in rows])
     # Prefixed so they cannot collide with the episode-based evaluation's own
     # `success_rate`/`death_rate`, which are still reported alongside these.
     metrics["grid_survival_rate"] = _mean([row["survival_rate"] for row in rows])
-    metrics["grid_drift_speed_mps"] = _mean([row["drift_speed_mps"] for row in rows])
+    metrics["grid_task_success_rate"] = _mean([row["task_success_rate"] for row in rows])
+    metrics["grid_drift_speed_mps"] = _mean_present([row["drift_speed_mps"] for row in rows])
     metrics["grid_fall_count"] = float(sum(row["fall_count"] for row in rows))
+    metrics["grid_settle_fall_count"] = float(sum(row["settle_fall_count"] for row in rows))
+    metrics["grid_measure_fall_count"] = float(sum(row["measure_fall_count"] for row in rows))
+    # How much of the sweep the tracking aggregates above actually rest on. A
+    # nonzero count means `track_*` describes only the commands that had a
+    # survivor, and must not be read as sweep-wide performance.
+    metrics["commands_all_dead"] = int(sum(1 for row in rows if row["num_contributing"] == 0))
+    metrics["commands_total"] = len(rows)
     metrics["command_tracking"] = [
         {
             "command": row["command"],
             "measured": row["measured"],
             "error": row["error"],
             "survival_rate": row["survival_rate"],
+            "task_success_rate": row["task_success_rate"],
             "fall_count": row["fall_count"],
+            "settle_fall_count": row["settle_fall_count"],
+            "measure_fall_count": row["measure_fall_count"],
+            "num_contributing": row["num_contributing"],
+            "num_complete": row["num_complete"],
             "foot_lifts_per_s": row["foot_lifts_per_s"],
             "double_stance_fraction": row["double_stance_fraction"],
             "drift_speed_mps": row["drift_speed_mps"],

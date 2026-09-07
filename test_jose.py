@@ -248,6 +248,8 @@ def test_locomotion_summarize_normalizes_each_axis_by_its_command_range():
                 "vx_mean": 0.0, "vy_mean": 0.0, "yaw_mean": 0.0,
             },
             "survival_rate": 1.0, "fall_count": 0, "base_height_m": 0.78,
+            "settle_fall_count": 0, "measure_fall_count": 0,
+            "num_contributing": 4, "num_complete": 4, "task_success_rate": 1.0,
             "feet_air_time_reward": 0.1, "feet_slide_penalty": 0.0,
             "foot_lifts_per_s": 2.0, "double_stance_fraction": 0.3, "drift_speed_mps": 0.0,
         }
@@ -1171,3 +1173,166 @@ def test_run_all_ablation_builds_translated_task_and_headless_flags(tmp_path):
     case_index = comparison_command.index("--case")
     assert comparison_command[case_index + 1 : case_index + 3] == ["locomotion", "ckpt.pt"]
     assert "--seeds" in comparison_command and "7" in comparison_command
+
+
+def _locomotion_row(
+    locomotion=None, *, vx_rmse=0.1, vy_rmse=0.1, yaw_rmse=0.1, alive=True, settle_falls=0,
+):
+    """One command's result, with every field ``summarize`` reads.
+
+    ``alive=False`` is the all-dead case: no environment reached the measurement
+    window, so every survivor-derived field is ``None``.
+    """
+    present = lambda v: v if alive else None  # noqa: E731
+    return {
+        "command": {"vx": 0.0, "vy": 0.0, "yaw": 0.0},
+        "measured": {"vx": present(0.0), "vy": present(0.0), "yaw": present(0.0)},
+        "error": {
+            "vx_rmse": present(vx_rmse), "vy_rmse": present(vy_rmse), "yaw_rmse": present(yaw_rmse),
+            "vx_mean": present(0.0), "vy_mean": present(0.0), "yaw_mean": present(0.0),
+        },
+        "survival_rate": 1.0 if alive else 0.0,
+        "task_success_rate": 1.0 if alive else 0.0,
+        "fall_count": 0 if alive else 4,
+        "settle_fall_count": settle_falls if alive else 4,
+        "measure_fall_count": 0,
+        "num_envs": 4,
+        "num_contributing": 4 if alive else 0,
+        "num_complete": 4 if alive else 0,
+        "base_height_m": present(0.78),
+        "feet_air_time_reward": present(0.1),
+        "feet_slide_penalty": present(0.0),
+        "foot_lifts_per_s": present(2.0),
+        "double_stance_fraction": present(0.3),
+        "drift_speed_mps": present(0.0),
+    }
+
+
+def test_locomotion_summarize_survives_a_command_where_every_robot_fell():
+    """An all-dead command must not turn the whole sweep into NaN.
+
+    The friction sweep hit exactly this: at mu=0.2 three commands killed every
+    environment during settle, `mean()` over an empty tensor produced NaN, and
+    `track_error_norm` came back NaN for the entire run.
+    """
+    locomotion = _load_module("jose_g1_locomotion_alldead", JOSE_DIR / "estimator" / "locomotion.py")
+
+    metrics = locomotion.summarize({
+        "a": _locomotion_row(vx_rmse=0.2, vy_rmse=0.1, yaw_rmse=0.4),
+        "dead": _locomotion_row(alive=False),
+    })
+
+    assert metrics["track_error_norm"] == metrics["track_error_norm"], "must not be NaN"
+    # The surviving command alone determines the tracking aggregate.
+    assert metrics["track_vx_rmse"] == pytest.approx(0.2)
+    assert metrics["commands_all_dead"] == 1
+    assert metrics["commands_total"] == 2
+
+
+def test_locomotion_summarize_reports_none_when_no_command_had_a_survivor():
+    """With nothing measured, the honest answer is "no value", not zero."""
+    locomotion = _load_module("jose_g1_locomotion_nosurv", JOSE_DIR / "estimator" / "locomotion.py")
+
+    metrics = locomotion.summarize({
+        "a": _locomotion_row(alive=False),
+        "b": _locomotion_row(alive=False),
+    })
+
+    assert metrics["track_error_norm"] is None
+    assert metrics["track_vx_rmse"] is None
+    assert metrics["commands_all_dead"] == 2
+    # Survival is still a real measurement even when tracking is not.
+    assert metrics["grid_survival_rate"] == pytest.approx(0.0)
+
+
+def test_locomotion_summarize_counts_settle_falls():
+    """Falls before the measurement window must reach the totals.
+
+    They used to be dropped: `fell` was only updated while measuring, so a
+    command that killed every robot during settle reported `fall_count` 0.
+    """
+    locomotion = _load_module("jose_g1_locomotion_settle", JOSE_DIR / "estimator" / "locomotion.py")
+
+    metrics = locomotion.summarize({
+        "a": _locomotion_row(settle_falls=2),
+        "dead": _locomotion_row(alive=False),
+    })
+
+    assert metrics["grid_settle_fall_count"] == pytest.approx(6.0)  # 2 + 4
+    assert metrics["grid_fall_count"] == pytest.approx(4.0)
+
+
+def test_locomotion_task_success_threshold_is_fixed_and_dimensionless():
+    """The success rule is pre-registered, so a rerun cannot move it."""
+    locomotion = _load_module("jose_g1_locomotion_thresh", JOSE_DIR / "estimator" / "locomotion.py")
+
+    assert locomotion.TASK_SUCCESS_MAX_NORM_ERROR == 0.25
+    metrics = locomotion.summarize({"a": _locomotion_row(), "b": _locomotion_row(alive=False)})
+    assert metrics["grid_task_success_rate"] == pytest.approx(0.5)
+
+
+def _history_module():
+    return _load_module("jose_g1_history_cmd", JOSE_DIR / "distillation" / "history.py")
+
+
+def test_command_conditioned_frames_are_three_wider():
+    """Locomotion students carry (vx, vy, yaw); AMP students do not."""
+    history = _history_module()
+
+    assert history.frame_dim_for("joint_only", False) == 87
+    assert history.frame_dim_for("imu", False) == 93
+    assert history.frame_dim_for("joint_only", True) == 90
+    assert history.frame_dim_for("imu", True) == 96
+    assert history.COMMAND_DIM == 3
+
+
+def test_command_is_appended_after_the_sensor_block():
+    """Order matters: the sensor layout must not shift when a command is added."""
+    torch = pytest.importorskip("torch")
+    history = _history_module()
+
+    pos = torch.zeros(2, 29)
+    vel = torch.ones(2, 29)
+    act = torch.full((2, 29), 2.0)
+    command = torch.tensor([[0.6, 0.0, 0.0], [0.0, 0.0, 1.0]])
+
+    plain = history.build_joint_frame(pos, vel, act)
+    commanded = history.build_joint_frame(pos, vel, act, command)
+
+    assert plain.shape == (2, 87)
+    assert commanded.shape == (2, 90)
+    assert torch.equal(commanded[:, :87], plain)
+    assert torch.equal(commanded[:, 87:], command)
+
+
+def test_command_width_is_validated():
+    torch = pytest.importorskip("torch")
+    history = _history_module()
+    pos = vel = act = torch.zeros(1, 29)
+    with pytest.raises(ValueError, match="velocity command"):
+        history.build_joint_frame(pos, vel, act, torch.zeros(1, 2))
+
+
+def test_legacy_checkpoints_are_readable_but_not_command_conditioned():
+    """Students trained before the fix must not be scored as command-aware.
+
+    Their weights load, but they never saw the command, so evaluating them as a
+    command-conditioned baseline measures a mis-specified model rather than
+    distillation. The mismatch is an error, not a warning.
+    """
+    command_eval = _history_module()
+
+    legacy = {"method": "joint_only", "adapter": "ppo_walk"}  # no command_dim
+    fixed = {"method": "joint_only", "adapter": "ppo_walk", "command_dim": 3}
+    amp = {"method": "joint_only", "adapter": "amp", "command_dim": 0}
+
+    assert command_eval.checkpoint_command_conditioning(legacy) is False
+    assert command_eval.checkpoint_command_conditioning(fixed) is True
+
+    with pytest.raises(RuntimeError, match="command-blind"):
+        command_eval.require_command_conditioning(legacy, True, "legacy.pt")
+    command_eval.require_command_conditioning(fixed, True, "fixed.pt")
+    command_eval.require_command_conditioning(amp, False, "amp.pt")
+
+    with pytest.raises(RuntimeError, match="supplies no command"):
+        command_eval.require_command_conditioning(fixed, False, "fixed.pt")

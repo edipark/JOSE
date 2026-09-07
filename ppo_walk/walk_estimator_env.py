@@ -52,4 +52,8 @@ class G1WalkEstimatorEnv(ManagerBasedRLEnv):
             "quaternion_wxyz": data.root_quat_w,
             "angular_velocity": data.root_ang_vel_b,
             "projected_gravity": data.projected_gravity_b,
+            # Deployable, and load-bearing: this teacher's action depends on it,
+            # so a student that cannot see it cannot imitate the teacher. An
+            # operator supplies the same three numbers on hardware.
+            "velocity_command": self.command_manager.get_command("base_velocity")[:, :3],
         }

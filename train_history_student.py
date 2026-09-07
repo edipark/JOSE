@@ -88,8 +88,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import isaaclab_tasks  # noqa: F401
 
 from jose.distillation.history import (
-    IMU_FRAME_DIM,
-    JOINT_FRAME_DIM,
+    COMMAND_DIM,
+    frame_dim_for,
     HistoryMLPStudent,
     ObservationHistory,
 )
@@ -147,7 +147,11 @@ def main(env_cfg, agent_cfg):
     )
     corruptor = SensorCorruptor(args_cli.num_envs, device, corruption_cfg)
     imu_spec = IMUObservationSpec()
-    frame_dim = JOINT_FRAME_DIM if args_cli.method == "joint_only" else IMU_FRAME_DIM
+    # The locomotion teacher is conditioned on a velocity command; the AMP
+    # teachers track a fixed clip and have none. Only the former puts the command
+    # in the student's input.
+    command_conditioned = args_cli.adapter == "ppo_walk"
+    frame_dim = frame_dim_for(args_cli.method, command_conditioned)
     student = HistoryMLPStudent(frame_dim, window=args_cli.window).to(device)
     history = ObservationHistory(args_cli.num_envs, args_cli.window, frame_dim, device)
     optimizer = torch.optim.AdamW(student.parameters(), lr=args_cli.lr, weight_decay=args_cli.weight_decay)
@@ -172,7 +176,9 @@ def main(env_cfg, agent_cfg):
 
     # Built by distillation/command_eval.py so eval_distillation_grid.py feeds a
     # restored checkpoint exactly what training fed it.
-    frame = build_frame_fn(core, args_cli.method, imu_spec, corruptor)
+    frame = build_frame_fn(
+        core, args_cli.method, imu_spec, corruptor, command_conditioned=command_conditioned
+    )
 
     def payload(iteration: int) -> dict:
         return {
@@ -190,11 +196,17 @@ def main(env_cfg, agent_cfg):
             "observation_normalizer": observation_normalizer.state_dict(),
             "action_normalizer": action_normalizer.state_dict(),
             "sensor_corruption": corruption_cfg.__dict__,
+            # Recorded so a loader can tell a command-aware student from the
+            # command-blind ones trained before this was fixed, rather than
+            # inferring it from the input width.
+            "command_conditioned": command_conditioned,
+            "command_dim": COMMAND_DIM if command_conditioned else 0,
+            "frame_dim": frame_dim,
             "observation_features": (
                 ["joint_position", "joint_velocity", "previous_action"]
                 if args_cli.method == "joint_only"
                 else ["joint_position", "joint_velocity", "previous_action", "body_gyro", "quaternion_projected_gravity"]
-            ),
+            ) + (["velocity_command"] if command_conditioned else []),
             "explicit_linear_velocity": False,
             "raw_accelerometer": False,
         }

@@ -86,6 +86,8 @@ import isaaclab_tasks  # noqa: F401, E402
 
 from jose.distillation.command_eval import (  # noqa: E402
     build_frame_fn,
+    checkpoint_command_conditioning,
+    require_command_conditioning,
     build_student_policy,
     evaluate_student_command_grid,
 )
@@ -168,7 +170,12 @@ def main(env_cfg, agent_cfg):
         raise ValueError(f"Checkpoint task {checkpoint['task']!r} != --task {args_cli.task!r}")
 
     imu_spec = IMUObservationSpec()
-    frame = build_frame_fn(core, method, imu_spec, corruptor)
+    # ppo_walk is the command-conditioned adapter; AMP tasks have no command.
+    command_conditioned = checkpoint.get("adapter") == "ppo_walk"
+    require_command_conditioning(checkpoint, command_conditioned, str(checkpoint_path.name))
+    frame = build_frame_fn(
+        core, method, imu_spec, corruptor, command_conditioned=command_conditioned
+    )
     corruption = bool(args_cli.sensor_corruption)
     # joint_only has no IMU channels, so the flag cannot change anything for it.
     if method == "joint_only" and not corruption:
