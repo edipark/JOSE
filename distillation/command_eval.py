@@ -160,6 +160,7 @@ def evaluate_student_command_grid(
     settle_s: float = 1.0,
     measure_s: float = 4.0,
     seed: int | None = None,
+    command_seed_base: int | None = None,
     commands: Sequence[tuple[float, float, float]] | None = None,
 ) -> dict:
     """Drive ``act`` over the fixed command grid and summarise it.
@@ -187,4 +188,11 @@ def evaluate_student_command_grid(
         settle_steps=int(round(settle_s / step_dt)),
         measure_steps=int(round(measure_s / step_dt)),
     )
-    return summarize(evaluator.run_all(act, commands=commands, on_step=on_step))
+    return summarize(
+        evaluator.run_all(
+            act,
+            commands=commands,
+            on_step=on_step,
+            command_seed_base=command_seed_base,
+        )
+    )

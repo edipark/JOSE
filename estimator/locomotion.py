@@ -351,12 +351,38 @@ class CommandEvaluator:
                 "max_air_reward_in_double_stance": max_air_reward_in_double_stance,
             }
 
-    def run_all(self, policy, commands=None, on_step=None, progress=None) -> dict:
-        """Measure every command in turn, restoring the sampler afterwards."""
+    def run_all(
+        self,
+        policy,
+        commands=None,
+        on_step=None,
+        progress=None,
+        command_seed_base: int | None = None,
+    ) -> dict:
+        """Measure every command in turn, restoring the sampler afterwards.
+
+        ``command_seed_base`` makes resets comparable across policies.  A seed
+        is installed immediately before each command's reset, so random draws
+        made by a policy or a stateful sensor during an earlier command cannot
+        change the next command's initial condition.  Method and checkpoint
+        identities deliberately do not enter this seed.
+        """
+        import random
+
+        import numpy as np
+
         saved = self._saved_command_cfg()
         results = {}
         try:
-            for cmd in EVAL_COMMANDS if commands is None else commands:
+            selected = EVAL_COMMANDS if commands is None else commands
+            for index, cmd in enumerate(selected):
+                if command_seed_base is not None:
+                    command_seed = int(command_seed_base) + index
+                    random.seed(command_seed)
+                    np.random.seed(command_seed)
+                    torch.manual_seed(command_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(command_seed)
                 if progress is not None:
                     progress(cmd)
                 results[str(cmd)] = self.run(policy, cmd, on_step=on_step)

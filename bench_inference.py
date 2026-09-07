@@ -86,6 +86,45 @@ def load_set(device):
     return estimator, shape, params, str(path)
 
 
+def load_teacher(device):
+    """The locomotion teacher's own actor, timed the same way as the estimators.
+
+    Without this row "the estimator is cheap" is an assertion; with it the column
+    is a ratio against the forward pass the robot already pays every step. The
+    actor is the plain MLP rsl_rl trains (495 -> 512 -> 256 -> 128 -> 29 with ELU);
+    the critic never runs at deployment and the std parameter is not a layer, so
+    neither is timed.
+    """
+    path = ROOT / "logs/rsl_rl/isaac_g1_ppo_walk_jose_v0/2026-08-29_23-46-41/model_4999.pt"
+    if not path.is_file():
+        return None
+    from torch import nn
+
+    state = torch.load(path, map_location=device, weights_only=False)["actor_state_dict"]
+    widths = [state["mlp.0.weight"].shape[1]] + [
+        state[k].shape[0] for k in sorted(state) if k.startswith("mlp.") and k.endswith(".weight")
+    ]
+    layers = []
+    for i in range(len(widths) - 1):
+        layers.append(nn.Linear(widths[i], widths[i + 1]))
+        if i < len(widths) - 2:
+            layers.append(nn.ELU())
+    mlp = nn.Sequential(*layers).to(device)
+    mlp.load_state_dict({k[len("mlp."):]: v for k, v in state.items() if k.startswith("mlp.")})
+
+    class Actor(nn.Module):
+        # time_forward calls .predict, the interface NormalizedEstimator exposes.
+        def __init__(self, body):
+            super().__init__(); self.body = body
+        def predict(self, x):
+            return self.body(x)
+
+    actor = Actor(mlp).to(device)
+    actor.eval()
+    params = sum(p.numel() for p in actor.parameters())
+    return actor, (widths[0],), params, str(path)
+
+
 @torch.no_grad()
 def time_forward(estimator, shape, batch: int, repeats: int, warmup: int, device) -> float:
     """Median microseconds per sample."""
@@ -120,7 +159,8 @@ def main() -> None:
     for label, loader in (("LSTM", lambda: load_jose("lstm", device)),
                           ("History MLP", lambda: load_jose("history_mlp", device)),
                           ("TCN", lambda: load_jose("tcn", device)),
-                          ("SET", lambda: load_set(device))):
+                          ("SET", lambda: load_set(device)),
+                          ("Teacher policy", lambda: load_teacher(device))):
         loaded = loader()
         if loaded is None:
             print(f"  {label:12s} checkpoint not found")

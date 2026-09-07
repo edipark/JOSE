@@ -16,10 +16,12 @@ Two things about the shape of the data are deliberate rather than incidental:
   standard deviation, which would imply a symmetric spread the data do not have.
   This is also why ``train_state_estimator.py`` selects the best round on
   closed-loop behaviour instead of taking the last one.
-* **Locomotion is sampled at four rounds, the AMP tasks at eleven.** The
-  locomotion sweep ran {0, 2, 5, 10} because a full sweep is eleven arms times
-  three seeds and the four points already resolve the shape. Markers show which
-  rounds were measured.
+* **Every task is now sampled at all eleven rounds.** The locomotion sweep
+  originally ran only {0, 2, 5, 10}; the 2026-09-05 fill completed it, and
+  because that fill ran under a different implementation fingerprint it is a
+  different variant of the same arm than the one Table II reports -- its r10
+  estimation RMSE is 0.0144 against the architecture study's 0.0129. Markers
+  show which rounds were measured.
 
 Typography, colours and the seed-spread convention are imported from
 ``plot_window.py`` so the two figures cannot drift apart.
