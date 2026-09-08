@@ -90,18 +90,80 @@ def compare(left_path: Path, right_path: Path, tolerances=None) -> dict:
     return {"passed": passed, "tolerances": tolerances, "methods": methods}
 
 
+METRIC_LABELS = {
+    "track_error_norm": "Command RMSE",
+    "grid_survival_rate": "Survival",
+    "feet_slide_penalty": "Feet slide",
+    "command_numeric": "Worst per-command value",
+}
+
+METRIC_ORDER = ("grid_survival_rate", "track_error_norm", "feet_slide_penalty", "command_numeric")
+
+
+def render_report(result: dict, forward: Path, reverse: Path) -> str:
+    verdict = "PASS" if result["passed"] else "FAIL"
+    lines = [
+        "# Friction sweep method-order gate",
+        "",
+        f"**{verdict}.** The same cells were evaluated twice in one process, once with the",
+        "methods in catalog order and once reversed. Agreement means a method's numbers do",
+        "not depend on which methods ran before it.",
+        "",
+        f"- forward: `{forward.name}`",
+        f"- reverse: `{reverse.name}`",
+        "",
+        "## Absolute forward-reverse difference",
+        "",
+        "| method | " + " | ".join(METRIC_LABELS[name] for name in METRIC_ORDER) + " | verdict |",
+        "|---" * (len(METRIC_ORDER) + 2) + "|",
+    ]
+    for label, record in result["methods"].items():
+        cells = [f"{record['differences'][name]:.2e}" for name in METRIC_ORDER]
+        name = label.replace("|", " / ")
+        lines.append(
+            f"| {name} | " + " | ".join(cells) + f" | {'pass' if record['passed'] else 'FAIL'} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Tolerances",
+            "",
+            "| quantity | tolerance |",
+            "|---|---|",
+        ]
+    )
+    for name in METRIC_ORDER:
+        lines.append(f"| {METRIC_LABELS[name]} | {result['tolerances'][name]:g} |")
+    lines.extend(
+        [
+            "",
+            "Survival is required to match exactly; the others carry a tolerance because",
+            "floating-point reduction order on the GPU is not fixed across call order.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("forward")
     parser.add_argument("reverse")
     parser.add_argument("--out")
+    parser.add_argument("--report")
     args = parser.parse_args()
-    result = compare(Path(args.forward), Path(args.reverse))
+    forward = Path(args.forward)
+    reverse = Path(args.reverse)
+    result = compare(forward, reverse)
     payload = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(payload, encoding="utf-8")
+    if args.report:
+        report = Path(args.report)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(render_report(result, forward, reverse), encoding="utf-8")
     print(payload, end="")
     if not result["passed"]:
         raise SystemExit(1)
