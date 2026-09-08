@@ -65,6 +65,8 @@ ROWS = (
         "split": 4,
         "scales": (1.0, 2.0),
         "track_lim": (0, 1.32),
+        # The tallest bars in this row are on the left, so the key goes right.
+        "legend_loc": "upper right",
         "label_drop": -34,
     },
     {
@@ -76,7 +78,14 @@ ROWS = (
         ],
         "split": 4,
         "scales": (1.0, 2.0, 4.0),
-        "track_lim": (0, 0.78),
+        # 0.78 was fitted to the pre-command-fix run, where the distillation
+        # student reached 0.665 at four times nominal. It reaches 0.167 now, so
+        # that limit left four fifths of the panel empty. This is the same ~13 %
+        # headroom over the tallest bar that the encoder row carries.
+        "track_lim": (0, 0.2),
+        # Here the tall bars are the randomized block on the right, so the key
+        # goes left, over the two methods that read no IMU at all.
+        "legend_loc": "upper left",
         "label_drop": -27,
     },
 )
@@ -218,7 +227,7 @@ def plot(out: str, dpi: int) -> None:
         axes[r][1].legend(
             handles=[Patch(facecolor=LEVEL_COLOURS[s], edgecolor=LEVEL_EDGE,
                            linewidth=0.4, label=LEVEL_LABELS[s]) for s in row["scales"]],
-            loc="upper right", fontsize=5.0, frameon=False, handlelength=0.9,
+            loc=row["legend_loc"], fontsize=5.0, frameon=False, handlelength=0.9,
             handleheight=0.7, borderpad=0.1, labelspacing=0.25, borderaxespad=0.2,
         )
 
