@@ -55,7 +55,16 @@ TASKS = [
 # would otherwise change the effective font size. The legend is placed inside
 # the canvas rather than cropped in, so savefig does not use bbox_inches.
 FIGURE_SIZE = {"stacked": (3.4, 3.45), "side": (3.4, 1.72)}
+# The curve itself stays grey so it recedes behind the four task curves, which
+# are what the panel is about. Its axis does not: a grey scale and grey ticks
+# read as disabled chrome rather than as a second axis carrying real data.
 COST_COLOUR = "#8A8A8A"
+COST_AXIS_COLOUR = "#1A1A1A"
+
+#: Panel headings, shared with plot_dagger.py and plot_degradation.py so the
+#: three results figures carry one system of lettering.
+TITLE_SIZE = 7.5
+TITLE_PAD = 2.5
 RULE_COLOUR = "#B8B8B8"
 CHOSEN_WINDOW = 25
 WINDOW_TICKS = [1, 5, 10, 25, 50]
@@ -218,7 +227,7 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     left.set_ylabel("Survival (%)", labelpad=1.5)
     left.set_ylim(-8, 108)
     left.set_yticks([0, 25, 50, 75, 100])
-    left.text(0.0, 1.02, "(a)", transform=left.transAxes, va="bottom")
+    left.set_title("(a)", fontsize=TITLE_SIZE, pad=TITLE_PAD, loc="left")
 
     for task, label, colour in available(sweeps, "rmse"):
         windows, centre, error = series(sweeps[task], "rmse", spread)
@@ -232,7 +241,7 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     right.set_yticks(ticks)
     right.set_yticklabels([("%g" % t) for t in ticks])
     right.set_ylim(0.005, 0.22)
-    right.text(0.0, 1.02, "(b)", transform=right.transAxes, va="bottom")
+    right.set_title("(b)", fontsize=TITLE_SIZE, pad=TITLE_PAD, loc="left")
 
     cost_axis = right.twinx()
     cost_axis.grid(False)
@@ -243,10 +252,10 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     )
     cost_axis.set_ylabel(
         "Cost (rel.)" if tight else "Inference cost (rel. $W\\!=\\!1$)",
-        color=COST_COLOUR, labelpad=1.5,
+        color=COST_AXIS_COLOUR, labelpad=1.0,
     )
-    cost_axis.tick_params(axis="y", colors=COST_COLOUR, pad=1.5)
-    cost_axis.spines["right"].set_color(COST_COLOUR)
+    cost_axis.tick_params(axis="y", colors=COST_AXIS_COLOUR, pad=1.0)
+    cost_axis.spines["right"].set_color(COST_AXIS_COLOUR)
     cost_axis.spines["top"].set_visible(False)
     cost_axis.set_ylim(0, 4.4)
     cost_axis.set_yticks([1, 2, 3, 4])
@@ -258,24 +267,30 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     if stacked:
         left.set_xlabel("")
 
-    # One legend above both panels: the task colours are shared, and putting it
-    # outside keeps it off the curves as tasks are added.
+    # Two legends, not one five-entry row: the four tasks share an encoding and
+    # belong on a line of their own, while the cost curve reads against a
+    # different axis and is set apart beneath. A single ncol=5 legend fills
+    # column-major, so it would break the tasks across two lines instead.
     handles, labels = left.get_legend_handles_labels()
-    extra = cost_axis.get_legend_handles_labels()
-    entries = len(handles) + len(extra[0])
-    columns = min(entries, 4) if tight else (2 if entries <= 4 else 3)
+    cost_handles, cost_labels = cost_axis.get_legend_handles_labels()
     figure.legend(
-        handles + extra[0], labels + extra[1], loc="upper center",
-        bbox_to_anchor=(0.5, 1.0), frameon=False, handlelength=1.6,
-        ncol=columns, columnspacing=0.9,
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.005),
+        frameon=False, handlelength=1.6, ncol=4, columnspacing=1.1,
+        handletextpad=0.4,
+    )
+    figure.legend(
+        cost_handles, cost_labels, loc="upper center", bbox_to_anchor=(0.5, 0.885),
+        frameon=False, handlelength=1.6, handletextpad=0.4,
     )
     if stacked:
         figure.align_ylabels((left, right))
-    rows = 1 + (entries - 1) // columns
-    # The panel letters sit above the axes, so the reserved strip has to hold
-    # the legend and them, not just the legend.
-    save(figure, out, dpi, legend_rows=rows * (2.7 if tight else 1.6),
-         w_pad=1.8 if tight else None)
+    # Explicit margins rather than tight_layout: the canvas is fixed at the
+    # column width, so every hundredth of an inch not spent on padding goes to
+    # the axes themselves.
+    figure.subplots_adjust(left=0.113, right=0.880, top=0.735, bottom=0.195,
+                           wspace=0.60)
+    figure.savefig(out, dpi=dpi)
+    print(f"wrote {out}")
 
 
 def main() -> None:

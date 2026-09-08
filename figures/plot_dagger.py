@@ -114,10 +114,10 @@ def plot_dagger(sweeps, spread: str, out: str, dpi: int) -> None:
             rounds, centre, yerr=error, color=colour, label=label, marker="o",
             capsize=1.6, elinewidth=0.5, capthick=0.5, zorder=3,
         )
-    left.set_ylabel("Survival (%)", labelpad=1.5)
+    left.set_ylabel("Survival (%)", labelpad=1.0)
     left.set_ylim(-8, 108)
     left.set_yticks([0, 25, 50, 75, 100])
-    left.text(0.0, 1.02, "(a)", transform=left.transAxes, va="bottom")
+    left.set_title("(a)", fontsize=shared.TITLE_SIZE, pad=shared.TITLE_PAD, loc="left")
 
     for task, label, colour in shared.available(sweeps, "rmse"):
         rounds, centre, error = shared.series(sweeps[task], "rmse", spread)
@@ -129,12 +129,12 @@ def plot_dagger(sweeps, spread: str, out: str, dpi: int) -> None:
     # every task, so a linear axis would flatten everything after r01 into the
     # baseline and hide where each task actually settles.
     right.set_yscale("log")
-    right.set_ylabel("Estimation RMSE", labelpad=1.5)
+    right.set_ylabel("Estimation RMSE", labelpad=1.0)
     ticks = [0.01, 0.02, 0.05, 0.1, 0.2]
     right.set_yticks(ticks)
     right.set_yticklabels([("%g" % t) for t in ticks])
     right.set_ylim(0.008, 0.3)
-    right.text(0.0, 1.02, "(b)", transform=right.transAxes, va="bottom")
+    right.set_title("(b)", fontsize=shared.TITLE_SIZE, pad=shared.TITLE_PAD, loc="left")
 
     for axis in (left, right):
         # r00 is the no-aggregation baseline, so it is worth marking as a
@@ -144,13 +144,19 @@ def plot_dagger(sweeps, spread: str, out: str, dpi: int) -> None:
         round_axis(axis)
 
     handles, labels = left.get_legend_handles_labels()
-    columns = min(len(handles), 4)
     figure.legend(
-        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.0),
-        frameon=False, handlelength=1.6, ncol=columns, columnspacing=0.9,
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.005),
+        frameon=False, handlelength=1.6, ncol=min(len(handles), 4),
+        columnspacing=1.1, handletextpad=0.4,
     )
-    rows = 1 + (len(handles) - 1) // max(columns, 1)
-    shared.save(figure, out, dpi, legend_rows=rows * 2.7, w_pad=1.8)
+    # Explicit margins rather than tight_layout: the canvas is fixed at the
+    # column width, so every hundredth of an inch not spent on padding goes to
+    # the axes themselves. One legend row here against two in fig_window, so the
+    # reserved strip is shallower and the panels are correspondingly taller.
+    figure.subplots_adjust(left=0.113, right=0.995, top=0.815, bottom=0.195,
+                           wspace=0.34)
+    figure.savefig(out, dpi=dpi)
+    print(f"wrote {out}")
 
 
 def main() -> None:

@@ -97,10 +97,7 @@ BLOCK_TINT = "#EFEFE9"
 BLOCK_GAP = 0.55
 FIGURE_SIZE = (3.4, 3.98)
 
-#: Panel headings, shared with plot_sweeps.py so the two results figures carry
-#: the same lettering.
-TITLE_SIZE = 7.5
-TITLE_PAD = 2.5
+
 SURVIVAL_LIM = (0, 112)
 
 
@@ -205,11 +202,13 @@ def plot(out: str, dpi: int) -> None:
             axis = axes[r][c]
             panel(axis, row, sweeps, key, ylabel, ylim, show_labels=True, show_header=(c == 0))
             # The title names the degraded sensor and the y-label names the
-            # metric, which is how plot_sweeps.py splits the same job. Carrying
-            # both in the title needs 6.2 pt to fit the panel, and that reads as
-            # a second typographic system next to the other results figure.
+            # metric. Carrying both in the title needs 6.2 pt to fit the panel,
+            # which reads as a second typographic system beside the other two
+            # results figures; the size comes from plot_window.py so it cannot
+            # drift from them.
             axis.set_title(f"({'abcd'[r * 2 + c]}) {row['title']}",
-                           fontsize=TITLE_SIZE, pad=TITLE_PAD, loc="left")
+                           fontsize=shared.TITLE_SIZE, pad=shared.TITLE_PAD,
+                           loc="left")
 
         # One key per row: the rows ramp over different level sets, and a shared
         # key would list a level that half the figure never measured.
