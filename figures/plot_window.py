@@ -279,7 +279,7 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
         handletextpad=0.4,
     )
     figure.legend(
-        cost_handles, cost_labels, loc="upper center", bbox_to_anchor=(0.5, 0.885),
+        cost_handles, cost_labels, loc="upper center", bbox_to_anchor=(0.5, 0.925),
         frameon=False, handlelength=1.6, handletextpad=0.4,
     )
     if stacked:
@@ -287,7 +287,10 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     # Explicit margins rather than tight_layout: the canvas is fixed at the
     # column width, so every hundredth of an inch not spent on padding goes to
     # the axes themselves.
-    figure.subplots_adjust(left=0.113, right=0.880, top=0.735, bottom=0.195,
+    # The panel titles sit above the axes and the cost legend sits below the
+    # task legend, so the reserved strip has to clear both: at top=0.735 the
+    # "(b)" ran into "Inference cost".
+    figure.subplots_adjust(left=0.113, right=0.880, top=0.705, bottom=0.195,
                            wspace=0.60)
     figure.savefig(out, dpi=dpi)
     print(f"wrote {out}")
