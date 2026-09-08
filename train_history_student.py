@@ -211,6 +211,12 @@ def main(env_cfg, agent_cfg):
             "raw_accelerometer": False,
         }
 
+    def _snapshot(normalizer) -> dict:
+        return {
+            name: (value.clone() if isinstance(value, torch.Tensor) else value)
+            for name, value in normalizer.state_dict().items()
+        }
+
     def save(iteration: int, name: str) -> None:
         torch.save(payload(iteration), checkpoints / name)
 
@@ -342,7 +348,26 @@ def main(env_cfg, agent_cfg):
                     best_length = corrupted["episode_length_mean"]
                     best_iteration = iteration
                     best_metrics = row
-                    best_state = {name: value.detach().cpu().clone() for name, value in student.state_dict().items()}
+                    # The two normalizers live outside the module, so
+                    # `student.state_dict()` does not carry them and restoring
+                    # only that leaves the best weights paired with whatever the
+                    # normalizers had drifted to by the end of training -- a
+                    # combination never written to disk and never deployed. The
+                    # checkpoint below has always stored all three; this makes
+                    # the in-memory restore agree with it.
+                    best_state = {
+                        "model": {
+                            name: value.detach().cpu().clone()
+                            for name, value in student.state_dict().items()
+                        },
+                        # Cloned, not just detached: RunningNormalizer.state_dict
+                        # ends in `.cpu()`, which is a no-op for a normalizer
+                        # already on CPU and hands back the live tensor, and
+                        # `update` writes it in place. It also mixes tensors with
+                        # plain floats, so only the tensors are cloned.
+                        "observation_normalizer": _snapshot(observation_normalizer),
+                        "action_normalizer": _snapshot(action_normalizer),
+                    }
                     save(iteration, "student_best_eval.pt")
                 force_skrl_isaaclab_reset(env)
                 observations, _ = env.reset()
@@ -352,7 +377,9 @@ def main(env_cfg, agent_cfg):
         # checkpoint. Deliberately after the loop: it rolls the env twice more
         # and would otherwise perturb training's random stream.
         if best_state is not None:
-            student.load_state_dict(best_state)
+            student.load_state_dict(best_state["model"])
+            observation_normalizer.load_state_dict(best_state["observation_normalizer"])
+            action_normalizer.load_state_dict(best_state["action_normalizer"])
         student.eval()
 
         # Shared with eval_distillation_grid.py so a back-filled run and a fresh
