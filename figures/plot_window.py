@@ -290,7 +290,11 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     # The panel titles sit above the axes and the cost legend sits below the
     # task legend, so the reserved strip has to clear both: at top=0.735 the
     # "(b)" ran into "Inference cost".
-    figure.subplots_adjust(left=0.113, right=0.880, top=0.705, bottom=0.195,
+    # right=0.880 reserved 0.41 in for the cost axis, which needs about half
+    # that: the figure came out 0.20 in short of the column on one side only,
+    # which reads as a misaligned float rather than as margin. The panels take
+    # the difference.
+    figure.subplots_adjust(left=0.113, right=0.937, top=0.705, bottom=0.195,
                            wspace=0.60)
     figure.savefig(out, dpi=dpi)
     print(f"wrote {out}")
