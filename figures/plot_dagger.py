@@ -51,7 +51,9 @@ import plot_window as shared
 #: explicitly and leaves the default-length run (``--dagger_rounds 10``) bare.
 FULL_ROUNDS = 10
 
-FIGURE_SIZE = (3.4, 1.72)
+# Shorter than fig_window because the legend is one row rather than two. The
+# panels inside are the same size as that figure's; see shared.PANEL_SIZE.
+FIGURE_SIZE = (3.4, 1.60)
 ROUND_TICKS = [0, 2, 4, 6, 8, 10]
 
 
@@ -153,8 +155,8 @@ def plot_dagger(sweeps, spread: str, out: str, dpi: int) -> None:
     # column width, so every hundredth of an inch not spent on padding goes to
     # the axes themselves. One legend row here against two in fig_window, so the
     # reserved strip is shallower and the panels are correspondingly taller.
-    figure.subplots_adjust(left=0.113, right=0.995, top=0.815, bottom=0.195,
-                           wspace=0.34)
+    figure.subplots_adjust(left=0.113, right=0.995, top=0.758, bottom=0.210,
+                           wspace=0.535)
     figure.savefig(out, dpi=dpi)
     print(f"wrote {out}")
 

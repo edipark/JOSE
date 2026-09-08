@@ -65,6 +65,13 @@ COST_AXIS_COLOUR = "#1A1A1A"
 #: three results figures carry one system of lettering.
 TITLE_SIZE = 7.5
 TITLE_PAD = 2.5
+
+#: The two sweep figures draw panels of the same size, so a reader comparing
+#: them is comparing curves and not axes. This figure carries the cost axis and
+#: is the tighter of the two, so it sets the target; plot_dagger.py has width to
+#: spare and spends it on the gap between its panels rather than on wider ones.
+PANEL_SIZE = (1.183, 0.877)
+PANEL_WSPACE_WINDOW = 0.368
 RULE_COLOUR = "#B8B8B8"
 CHOSEN_WINDOW = 25
 WINDOW_TICKS = [1, 5, 10, 25, 50]
@@ -295,7 +302,7 @@ def plot_window(sweeps, spread: str, out: str, dpi: int, layout: str) -> None:
     # which reads as a misaligned float rather than as margin. The panels take
     # the difference.
     figure.subplots_adjust(left=0.113, right=0.937, top=0.705, bottom=0.195,
-                           wspace=0.60)
+                           wspace=PANEL_WSPACE_WINDOW)
     figure.savefig(out, dpi=dpi)
     print(f"wrote {out}")
 
