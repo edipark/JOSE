@@ -95,7 +95,10 @@ LEVEL_LABELS = {1.0: "nominal", 2.0: "$2\\times$", 4.0: "$4\\times$"}
 BLOCK_TINT = "#EFEFE9"
 
 BLOCK_GAP = 0.55
-FIGURE_SIZE = (3.4, 3.98)
+# Height trimmed to the ink: at 3.98 in the canvas carried 0.06 in of white
+# above the titles and 0.22 in below the rotated tick labels, which the float
+# then padded again. The axes keep their drawn size; only the blank margin goes.
+FIGURE_SIZE = (3.4, 3.72)
 
 
 SURVIVAL_LIM = (0, 112)
@@ -219,7 +222,7 @@ def plot(out: str, dpi: int) -> None:
             handleheight=0.7, borderpad=0.1, labelspacing=0.25, borderaxespad=0.2,
         )
 
-    figure.subplots_adjust(left=0.092, right=0.999, top=0.958, bottom=0.163,
+    figure.subplots_adjust(left=0.092, right=0.999, top=0.968, bottom=0.118,
                            wspace=0.26, hspace=0.70)
     figure.savefig(out, dpi=dpi)
     plt.close(figure)
