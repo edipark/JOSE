@@ -1,11 +1,14 @@
 """Re-measure teacher-relative motion fidelity from a distillation checkpoint.
 
 ``train_history_student.py`` reports MPJPE from memory at the end of training,
-and that report is wrong whenever the best checkpoint is not the last one. It
-restores ``best_state`` -- which clones ``student.state_dict()`` and nothing else
--- while the two ``RunningNormalizer``s keep updating to the end of training. The
-reported policy is therefore the best weights paired with the final normalizers,
-a combination that was never saved and never runs anywhere.
+and every run made before commit ``e0ce15e`` reported it wrongly whenever the
+best checkpoint was not the last one. ``best_state`` cloned
+``student.state_dict()`` and nothing else, while the two ``RunningNormalizer``s
+-- which live outside the module -- kept updating to the end of training. The
+reported policy was therefore the best weights paired with the final normalizers,
+a combination that was never saved and never ran anywhere. The trainer now
+snapshots and restores both normalizers alongside the weights, so a fresh run
+does not need this script; it exists to re-measure the runs made before that fix.
 
 ``student_best_eval.pt`` holds the weights *and* both normalizers as of the
 iteration it was saved at, so loading it restores the policy that actually

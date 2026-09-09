@@ -78,8 +78,10 @@ from datetime import datetime
 import json
 import math
 from pathlib import Path
+import random
 import time
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
@@ -102,7 +104,7 @@ from jose.distillation.imu import IMUObservationSpec, SensorCorruptionCfg, Senso
 from jose.estimator.adapters import make_policy_adapter
 from jose.estimator.metrics import MetricAccumulator, step_metrics
 from jose.estimator.models import ReplayBuffer, RunningNormalizer
-from jose.estimator.pipeline import evaluate_paired_motion_fidelity, uses_locomotion_eval
+from jose.estimator.pipeline import evaluate_paired_motion_fidelity, frozen_rng, uses_locomotion_eval
 from jose.schema import SCHEMA_VERSION
 from jose.teacher_setup import build_env_and_teacher
 from jose.skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
@@ -112,6 +114,13 @@ from jose.skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 def main(env_cfg, agent_cfg):
     if args_cli.window <= 0:
         raise ValueError("--window must be positive")
+    # Seed every stream the run can draw from, not just torch. The estimator and
+    # SET trainers already do this (train_state_estimator.py, train_set_baseline.py);
+    # this trainer used to seed torch alone, which left any numpy or `random` draw
+    # made during env construction or the 300x250 rollout on a process-dependent
+    # stream while the methods it is compared against were seeded.
+    random.seed(args_cli.seed)
+    np.random.seed(args_cli.seed)
     torch.manual_seed(args_cli.seed)
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
@@ -340,8 +349,18 @@ def main(env_cfg, agent_cfg):
                 flush=True,
             )
             if iteration % args_cli.eval_interval == 0 or iteration == args_cli.num_iterations:
-                corrupted = evaluate(True)
-                clean = evaluate(False) if args_cli.method == "imu" else dict(corrupted)
+                # Metric-only rollouts, so they must not advance the stream that
+                # training draws from. Without this the `imu` arm -- the only one
+                # that runs the second, clean evaluation below -- consumes strictly
+                # more RNG per eval interval than `joint_only`, and the two arms
+                # train on divergent streams from the first evaluation onward even
+                # at an identical seed. The environment reset after this block
+                # already re-synchronises the simulator; this re-synchronises the
+                # generator. Same remedy the estimator pipeline applies at
+                # estimator/pipeline.py:301.
+                with frozen_rng():
+                    corrupted = evaluate(True)
+                    clean = evaluate(False) if args_cli.method == "imu" else dict(corrupted)
                 row = {"iteration": iteration, "step": cumulative_gradient_steps, **corrupted, "clean_sensor_metrics": clean}
                 evaluations.append(row)
                 if corrupted["episode_length_mean"] > best_length:

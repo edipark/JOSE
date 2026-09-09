@@ -47,6 +47,16 @@ parser.add_argument(
 )
 parser.add_argument("--max-dataset-size", type=int, default=250_000)
 parser.add_argument("--epochs", type=int, default=50)
+# Dataset aggregation. Off by default, so the default invocation is byte-for-byte
+# the published protocol this file implements and the SET rows already recorded
+# stay reproducible from it. Turning it on gives the SET+DAgger arm: the same
+# architecture and objective trained on the distribution its own predictions
+# induce. See set_baseline/dagger.py for what is held fixed and why.
+parser.add_argument("--dagger-rounds", type=int, default=0)
+parser.add_argument("--dagger-epochs", type=int, default=10, help="Epochs per aggregation round")
+parser.add_argument("--dagger-est-ratio", type=float, default=0.8)
+parser.add_argument("--dagger-est-ratio-final", type=float, default=1.0)
+parser.add_argument("--dagger-est-ratio-schedule", choices=("linear", "constant"), default="linear")
 parser.add_argument("--batch-size", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=1.0e-3)
 parser.add_argument("--eval-episodes", type=int, default=200)
@@ -96,6 +106,7 @@ from jose.schema import SCHEMA_VERSION  # noqa: E402
 from jose.set_baseline import targets as set_targets  # noqa: E402
 from jose.set_baseline.adapter import SETPolicyAdapter  # noqa: E402
 from jose.set_baseline.collect import collect_expert_rollout  # noqa: E402
+from jose.set_baseline.dagger import collect_dagger_rollout, estimator_ratio_for  # noqa: E402
 from jose.set_baseline.evaluate import evaluate_set_closed_loop  # noqa: E402
 from jose.set_baseline.open_loop import evaluate_predictions_chunked  # noqa: E402
 from jose.set_baseline.model import SETEstimator  # noqa: E402
@@ -175,21 +186,6 @@ def main(env_cfg, agent_cfg):
 
     # -- closed loop, same protocol as every other row ---------------------
     pass_through_fn = adapter.pass_through_values if pass_through else None
-    metrics = evaluate_set_closed_loop(
-        env, adapter, teacher_agent, estimator, args_cli.context,
-        pass_through_fn=pass_through_fn,
-        episodes=args_cli.eval_episodes, max_episode_steps=args_cli.max_episode_steps,
-        seed=args_cli.seed + args_cli.eval_seed_offset,
-    )
-
-    # Open-loop error on the teacher-forced dataset. Reported separately and
-    # never as `rmse`: teacher forcing hides the exposure bias an autoregressive
-    # estimator actually pays, so the closed-loop figure above is the honest one.
-    open_loop = evaluate_predictions_chunked(estimator, dataset, args_cli.device)
-    metrics["open_loop_rmse"] = open_loop.get("rmse")
-    metrics["open_loop_r2"] = open_loop.get("r2")
-    metrics["r2"] = open_loop.get("r2")
-
     history = HistoryBuffer(args_cli.num_envs, args_cli.context, observation_dim, torch.device(args_cli.device))
 
     def act(observations: torch.Tensor) -> torch.Tensor:
@@ -201,27 +197,127 @@ def main(env_cfg, agent_cfg):
         history.reset(dones)
         estimator.reset(dones)
 
-    if locomotion:
+    def evaluate_all(current_dataset) -> dict:
+        """Every number reported for the estimator as it stands right now.
+
+        Factored out of the straight-line original so that an aggregation round is
+        scored on exactly what the final artifact is scored on, rather than on a
+        cheaper proxy. With ``--dagger-rounds 0`` it runs once, in the same order
+        and against the same seeds as before, which is what lets the published SET
+        protocol still reproduce from this file.
+        """
+        result = evaluate_set_closed_loop(
+            env, adapter, teacher_agent, estimator, args_cli.context,
+            pass_through_fn=pass_through_fn,
+            episodes=args_cli.eval_episodes, max_episode_steps=args_cli.max_episode_steps,
+            seed=args_cli.seed + args_cli.eval_seed_offset,
+        )
+        # Open-loop error on the teacher-forced dataset. Reported separately and
+        # never as `rmse`: teacher forcing hides the exposure bias an autoregressive
+        # estimator actually pays, so the closed-loop figure above is the honest one.
+        open_loop = evaluate_predictions_chunked(estimator, current_dataset, args_cli.device)
+        result["open_loop_rmse"] = open_loop.get("rmse")
+        result["open_loop_r2"] = open_loop.get("r2")
+        result["r2"] = open_loop.get("r2")
+
         estimator.reset()
         history.values.zero_()
-        metrics.update(
-            evaluate_student_command_grid(
-                env, adapter, act, on_step,
-                settle_s=args_cli.grid_settle_s, measure_s=args_cli.grid_measure_s,
-                seed=args_cli.seed + args_cli.eval_seed_offset,
+        if locomotion:
+            result.update(
+                evaluate_student_command_grid(
+                    env, adapter, act, on_step,
+                    settle_s=args_cli.grid_settle_s, measure_s=args_cli.grid_measure_s,
+                    seed=args_cli.seed + args_cli.eval_seed_offset,
+                )
             )
-        )
-    else:
-        estimator.reset()
-        history.values.zero_()
-        metrics.update(
-            evaluate_paired_motion_fidelity(
-                env, adapter, teacher_agent, act,
-                seed=args_cli.seed + args_cli.eval_seed_offset,
-                horizon=args_cli.mpjpe_horizon,
-                on_reset=lambda: (history.values.zero_(), estimator.reset()),
+        else:
+            result.update(
+                evaluate_paired_motion_fidelity(
+                    env, adapter, teacher_agent, act,
+                    seed=args_cli.seed + args_cli.eval_seed_offset,
+                    horizon=args_cli.mpjpe_horizon,
+                    on_reset=lambda: (history.values.zero_(), estimator.reset()),
+                )
             )
-        )
+        return result
+
+    def round_score(result: dict):
+        """Which round is reported. The same key train_state_estimator.py uses.
+
+        Locomotion is judged on command tracking because every method survives it
+        there, so episode length cannot separate rounds.
+        """
+        if locomotion:
+            return (-result["track_error_norm"], -result["death_rate"], -result["rmse"])
+        return (result["episode_length_mean"], -result["death_rate"], -result["rmse"])
+
+    metrics = evaluate_all(dataset)
+    rounds = [{"round": 0, "training": training, "evaluation": metrics}]
+
+    if args_cli.dagger_rounds > 0:
+        best_score = round_score(metrics)
+        best_round = 0
+        best_metrics = metrics
+        best_state = {name: value.detach().cpu().clone() for name, value in estimator.state_dict().items()}
+
+        for round_index in range(1, args_cli.dagger_rounds + 1):
+            ratio = estimator_ratio_for(
+                round_index, args_cli.dagger_rounds,
+                args_cli.dagger_est_ratio, args_cli.dagger_est_ratio_final,
+                args_cli.dagger_est_ratio_schedule,
+            )
+            print(f"[set] round {round_index}/{args_cli.dagger_rounds} estimator_ratio={ratio:.3f}", flush=True)
+            collection_started = time.monotonic()
+            new_data, round_collection = collect_dagger_rollout(
+                env, adapter, teacher_agent, estimator,
+                args_cli.collect_steps, args_cli.context, estimated, ratio,
+                pass_through_fn=pass_through_fn, max_samples=args_cli.max_dataset_size,
+            )
+            round_collection["duration_s"] = time.monotonic() - collection_started
+            # Same cap and the same uniform-subsample eviction as JOSE, so later
+            # rounds re-weight the distribution rather than grow it.
+            dataset = dataset.append(new_data, args_cli.max_dataset_size)
+
+            # Each round continues from wherever the previous one landed rather
+            # than from best_state, and the fit runs at half the initial rate.
+            # Both match train_state_estimator.py; the handoff choice is argued
+            # there and repeating it is what makes the two arms comparable.
+            round_training = train_estimator(
+                estimator, dataset, "SET", args_cli.dagger_epochs, args_cli.batch_size,
+                args_cli.lr * 0.5, args_cli.device, epoch_logger, seed=args_cli.seed * 1000 + round_index,
+            )
+            round_metrics = evaluate_all(dataset)
+            rounds.append({
+                "round": round_index,
+                "estimator_ratio": ratio,
+                "collection": round_collection,
+                "training": round_training,
+                "evaluation": round_metrics,
+            })
+            score = round_score(round_metrics)
+            if score > best_score:
+                best_score, best_round, best_metrics = score, round_index, round_metrics
+                best_state = {
+                    name: value.detach().cpu().clone() for name, value in estimator.state_dict().items()
+                }
+            print(
+                f"[set] round {round_index} scored; best so far is round {best_round}",
+                flush=True,
+            )
+
+        # The reported artifact is the best round, so the weights saved below have
+        # to be that round's. SETEstimator keeps its normalization in registered
+        # buffers, so its state_dict carries everything -- unlike the distillation
+        # students, whose normalizers live outside the module and had to be
+        # snapshotted separately (see train_history_student.py).
+        estimator.load_state_dict(best_state)
+        # A copy, not the round's own dict. The bookkeeping below adds keys to
+        # `metrics`, and `best_metrics` is the very object stored under
+        # rounds[best_round]["evaluation"] -- aliasing it would leak those keys
+        # into the per-round summary and make one round look unlike the others.
+        metrics = dict(best_metrics)
+        metrics["best_round"] = best_round
+        metrics["round_count"] = len(rounds)
 
     # A pass-through dimension is copied from the sensor, not regressed, so its
     # closed-loop error is identically zero -- unless the value SET copied is not
@@ -244,10 +340,37 @@ def main(env_cfg, agent_cfg):
             )
 
     metrics["parameters"] = sum(parameter.numel() for parameter in estimator.parameters())
-    metrics["best_validation_mse"] = training["best_validation_mse"]
-    metrics["total_gradient_steps"] = training["gradient_steps"]
-    metrics["learning_curve"] = [{"step": row["epoch"], **row} for row in training["epochs"]]
+    # Aggregated across rounds when there are any. With --dagger-rounds 0 the
+    # comprehension below spans the single round 0 entry and every one of these
+    # reduces to the pre-aggregation value, which is what keeps the published
+    # protocol's numbers identical.
+    metrics["best_validation_mse"] = min(row["training"]["best_validation_mse"] for row in rounds)
+    metrics["total_gradient_steps"] = sum(row["training"]["gradient_steps"] for row in rounds)
+    # `step` continues across rounds while staying equal to `epoch` within round 0,
+    # so a --dagger-rounds 0 run reproduces the recorded curve exactly (step 1..50)
+    # instead of being silently renumbered.
+    metrics["learning_curve"] = []
+    epoch_offset = 0
+    for row in rounds:
+        for epoch in row["training"]["epochs"]:
+            metrics["learning_curve"].append(
+                {"step": epoch_offset + epoch["epoch"], "round": row["round"], **epoch}
+            )
+        epoch_offset += len(row["training"]["epochs"])
     metrics["collection"] = collection
+    metrics["rounds"] = [
+        {
+            "round": row["round"],
+            "estimator_ratio": row.get("estimator_ratio", 0.0),
+            "samples": row.get("collection", collection)["samples"],
+            **{
+                key: value
+                for key, value in row["evaluation"].items()
+                if isinstance(value, (int, float))
+            },
+        }
+        for row in rounds
+    ]
     metrics["wall_time_s"] = time.monotonic() - started
 
     torch.save(
@@ -275,11 +398,24 @@ def main(env_cfg, agent_cfg):
                     "imu_noise_scale": args_cli.imu_noise_scale,
                     "max_dataset_size": args_cli.max_dataset_size,
                     "epochs": args_cli.epochs,
+                    "dagger_rounds": args_cli.dagger_rounds,
+                    "dagger_epochs": args_cli.dagger_epochs,
+                    "dagger_estimator_ratio_initial": args_cli.dagger_est_ratio,
+                    "dagger_estimator_ratio_final": args_cli.dagger_est_ratio_final,
+                    "dagger_estimator_ratio_schedule": args_cli.dagger_est_ratio_schedule,
+                    "eval_seed_offset": args_cli.eval_seed_offset,
                 },
                 "set_config": {
                     **estimator.config(),
                     "unspecified_in_paper": ["width", "heads", "dropout", "optimizer", "lr", "batch_size"],
-                    "data_protocol": "offline_expert_rollout",
+                    # The one place the arm names itself. "offline_expert_rollout"
+                    # is SET as published; anything else is the SET+DAgger arm and
+                    # must not be reported as SET.
+                    "data_protocol": (
+                        "offline_expert_rollout"
+                        if args_cli.dagger_rounds == 0
+                        else "offline_expert_rollout_then_dagger"
+                    ),
                 },
                 "target_split": split_description,
                 "metrics": metrics,

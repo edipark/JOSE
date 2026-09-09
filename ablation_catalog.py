@@ -83,6 +83,22 @@ TASKS = {
         "ppo_walk",
         "rsl_rl_cfg_entry_point",
     ),
+    # Same teacher recipe and the same estimator interface, on a terrain that
+    # stresses the contact assumption the method rests on: friction sampled per
+    # environment in [0.3, 1.0], and pyramid slopes of up to 0.4. Both keep the
+    # "ppo_walk" adapter, which is what earns them the command-grid evaluation --
+    # `uses_locomotion_eval` dispatches on the adapter, not the task id.
+    # Definitions in ppo_walk/terrain_env_cfg.py, ids in ppo_walk/terrain_tasks.py.
+    "locomotion_friction": (
+        "Isaac-G1-PPO-Walk-Friction-Estimator-JOSE-v0",
+        "ppo_walk",
+        "rsl_rl_cfg_entry_point",
+    ),
+    "locomotion_slope": (
+        "Isaac-G1-PPO-Walk-Slope-Estimator-JOSE-v0",
+        "ppo_walk",
+        "rsl_rl_cfg_entry_point",
+    ),
 }
 
 TRAINING_IMPLEMENTATION = (
@@ -126,6 +142,40 @@ TASK_IMPLEMENTATION = {
         "ppo_walk/walk_estimator_env.py",
         "ppo_walk/agents/rsl_rl_ppo_cfg.py",
         "ppo_walk/mdp/rewards.py",
+    ),
+    # The terrain variants subclass the flat configs, so they inherit every file
+    # above -- a change to the base task must invalidate them too -- and add the
+    # two files that define what makes them different. ``terrain_mdp.py`` is in
+    # here because it supplies the fall condition: on a slope the flat-terrain
+    # rule compares absolute world z and would decide survival by elevation.
+    #
+    # Note the *existing* keys are byte-identical to what they were. Adding keys
+    # to this dict cannot change any recorded digest, because a digest hashes
+    # only the tuple its own task names -- which is why the terrain variants are
+    # registered from ppo_walk/terrain_tasks.py rather than appended to
+    # __init__.py, a file every one of these tuples contains.
+    "locomotion_friction": (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+        "ppo_walk/terrain_env_cfg.py",
+        "ppo_walk/terrain_tasks.py",
+    ),
+    "locomotion_slope": (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+        "ppo_walk/terrain_env_cfg.py",
+        "ppo_walk/terrain_tasks.py",
+        "ppo_walk/mdp/terrain_mdp.py",
     ),
 }
 

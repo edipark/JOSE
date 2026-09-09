@@ -45,6 +45,12 @@ TASKS = {
     "dance": CATALOG_TASK_REGISTRY["amp_dance"][0],
     "jump": CATALOG_TASK_REGISTRY["amp_jump"][0],
     "locomotion": CATALOG_TASK_REGISTRY["locomotion"][0],
+    # The terrain variants keep their catalog key as their alias, so a case reads
+    # the same on the command line as it does in the catalog. They are ordinary
+    # locomotion tasks to everything below: same adapter, same agent entry point,
+    # same estimator interface -- only the environment they run in differs.
+    "locomotion_friction": CATALOG_TASK_REGISTRY["locomotion_friction"][0],
+    "locomotion_slope": CATALOG_TASK_REGISTRY["locomotion_slope"][0],
 }
 # Gym task id -> (estimator adapter kind, agent config entry point), so the
 # teacher/estimator/student commands below stay correct for a non-AMP task
@@ -82,7 +88,8 @@ def parse_cases(values: list[list[str]]) -> tuple[tuple[str, str], ...]:
         task_id = TASKS.get(key, task)
         if task_id not in TASKS.values():
             raise ValueError(
-                f"Unsupported task {task!r}; use walk, dance, jump, locomotion, or a matching JOSE task id"
+                f"Unsupported task {task!r}; use one of {', '.join(sorted(TASKS))}, "
+                "or a matching JOSE task id"
             )
         if task_id in seen:
             raise ValueError(f"Duplicate comparison task: {task_id}")

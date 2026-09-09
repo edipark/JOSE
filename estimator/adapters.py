@@ -37,23 +37,45 @@ def unwrap_direct_env(env):
 class PolicyAdapter(ABC):
     schema: ObservationSchema
 
-    def __init__(self, env, joint_preset: str = "all"):
+    #: Inertial channels appended to the estimator input when ``use_imu`` is set:
+    #: body-frame angular velocity and the projected gravity vector, three each.
+    IMU_INPUT_DIM = 6
+
+    def __init__(self, env, joint_preset: str = "all", use_imu: bool = False):
         self.env = env
         self.core_env = unwrap_direct_env(env)
         _, _, names = self.core_env.get_estimator_joint_state()
         self.joint_preset = joint_preset
         self.joint_ids = joint_indices(names, joint_preset)
+        self.use_imu = bool(use_imu)
 
     @property
     def input_dim(self) -> int:
-        return 2 * len(self.joint_ids)
+        return 2 * len(self.joint_ids) + (self.IMU_INPUT_DIM if self.use_imu else 0)
 
     def estimator_input(self) -> torch.Tensor:
         # Deliberately use the simulator-provided joint velocity. There is no
         # finite-difference, encoder quantization, EMA, or hardware-noise path.
         joint_pos, joint_vel, _ = self.core_env.get_estimator_joint_state()
         ids = torch.as_tensor(self.joint_ids, device=joint_pos.device)
-        return torch.cat((joint_pos.index_select(1, ids), joint_vel.index_select(1, ids)), dim=-1)
+        joints = torch.cat(
+            (joint_pos.index_select(1, ids), joint_vel.index_select(1, ids)), dim=-1
+        )
+        if not self.use_imu:
+            return joints
+        # The JOSE+IMU arm. It reads the same two inertial quantities SET reads,
+        # but only as *input*: it still regresses the full privileged target,
+        # where SET passes these six dimensions straight through to the policy
+        # and predicts base linear velocity alone. That is the whole difference
+        # between the two, and keeping the input identical is what isolates it.
+        #
+        # Appended after the joints rather than interleaved, so the joint block
+        # occupies exactly the indices it does without the IMU and the two arms
+        # differ by a suffix.
+        sensors = self.core_env.get_distillation_sensor_state()
+        return torch.cat(
+            (joints, sensors["angular_velocity"], sensors["projected_gravity"]), dim=-1
+        )
 
     def estimator_target(self) -> torch.Tensor:
         target = self.core_env.get_estimator_target()
@@ -126,8 +148,8 @@ class PpoWalkPolicyAdapter(PolicyAdapter):
 
     schema = PPO_WALK_OBSERVATION_SCHEMA
 
-    def __init__(self, env, joint_preset: str = "all"):
-        super().__init__(env, joint_preset)
+    def __init__(self, env, joint_preset: str = "all", use_imu: bool = False):
+        super().__init__(env, joint_preset, use_imu)
         self._history_indices = ppo_walk_history_target_indices()
         self._scales: torch.Tensor | None = None
         self._ring: torch.Tensor | None = None
@@ -169,13 +191,22 @@ class PpoWalkPolicyAdapter(PolicyAdapter):
         return inject_observation_estimate(observations, self._push(estimate), self._history_indices)
 
 
-def make_policy_adapter(kind: str, env, joint_preset: str = "all") -> PolicyAdapter:
+def make_policy_adapter(
+    kind: str, env, joint_preset: str = "all", use_imu: bool = False
+) -> PolicyAdapter:
+    """Build the adapter for ``kind``.
+
+    ``use_imu`` defaults to False, which is the configuration every result in the
+    paper was produced under: the estimator sees joint encoders and nothing else.
+    Setting it adds the six inertial channels to the estimator's *input* only --
+    the target, the injection indices and the policy observation are untouched.
+    """
     kind = kind.lower()
     if kind == "amp":
-        return AmpPolicyAdapter(env, joint_preset)
+        return AmpPolicyAdapter(env, joint_preset, use_imu)
     # "ppo" named the SKRL Direct PPO walk teacher, which was removed along with
     # its environment. It now resolves to the rsl-rl walk teacher so existing
     # commands and logged run metadata keep working.
     if kind in ("ppo_walk", "ppo"):
-        return PpoWalkPolicyAdapter(env, joint_preset)
+        return PpoWalkPolicyAdapter(env, joint_preset, use_imu)
     raise ValueError(f"Unknown policy adapter {kind!r}; choose amp or ppo_walk")

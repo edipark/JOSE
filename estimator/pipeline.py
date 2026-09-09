@@ -662,6 +662,11 @@ def save_jose_checkpoint(
         "observation_schema": adapter.schema.to_dict(),
         "joint_preset": adapter.joint_preset,
         "joint_names": JOINT_PRESETS[adapter.joint_preset],
+        # What the estimator reads, so a loader can rebuild the adapter that
+        # matches these weights instead of inferring it from the input width.
+        # False for every checkpoint written before the JOSE+IMU arm existed;
+        # `getattr` is what makes those still loadable.
+        "imu_input": getattr(adapter, "use_imu", False),
         "velocity_source": "sim_joint_velocity",
         "window": window,
         "model_config": model.config() if hasattr(model, "config") else {"type": model.__class__.__name__},

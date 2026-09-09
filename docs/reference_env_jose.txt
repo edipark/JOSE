@@ -1,0 +1,56 @@
+# JOSE reference environment
+# Captured from the machine that produced every result in the paper.
+# Compare with: python docs/check_env.py
+
+python           3.11.15
+platform         Linux-6.8.0-136-generic-x86_64-with-glibc2.35
+gpu              NVIDIA GeForce RTX 4070, 12282 MiB, 580.173.02
+
+[packages]
+isaacsim             5.1.0.0
+isaaclab             0.54.4
+isaaclab_assets      0.2.4
+isaaclab_rl          0.5.2
+isaaclab_tasks       0.11.16
+isaaclab_mimic       1.0.16
+isaaclab_contrib     0.0.2
+torch                2.7.0+cu128
+torchvision          0.22.0+cu128
+rsl-rl-lib           5.0.1
+skrl                 2.1.0
+numpy                1.26.0
+gymnasium            1.2.1
+scipy                1.15.3
+warp-lang            1.17.0
+trimesh              4.5.1
+tensorboard          2.21.0
+hydra-core           1.3.6
+omegaconf            2.3.1
+jose-humanoid        0.1.0
+
+[isaacsim wheels]
+isaacsim                                 5.1.0.0
+isaacsim-app                             5.1.0.0
+isaacsim-asset                           5.1.0.0
+isaacsim-benchmark                       5.1.0.0
+isaacsim-code-editor                     5.1.0.0
+isaacsim-core                            5.1.0.0
+isaacsim-cortex                          5.1.0.0
+isaacsim-example                         5.1.0.0
+isaacsim-extscache-kit                   5.1.0.0
+isaacsim-extscache-kit-sdk               5.1.0.0
+isaacsim-extscache-physics               5.1.0.0
+isaacsim-gui                             5.1.0.0
+isaacsim-kernel                          5.1.0.0
+isaacsim-replicator                      5.1.0.0
+isaacsim-rl                              5.1.0.0
+isaacsim-robot                           5.1.0.0
+isaacsim-robot-motion                    5.1.0.0
+isaacsim-robot-setup                     5.1.0.0
+isaacsim-ros1                            5.1.0.0
+isaacsim-ros2                            5.1.0.0
+isaacsim-sensor                          5.1.0.0
+isaacsim-storage                         5.1.0.0
+isaacsim-template                        5.1.0.0
+isaacsim-test                            5.1.0.0
+isaacsim-utils                           5.1.0.0

@@ -452,6 +452,237 @@ def test_history_distillation_uses_student_rollouts_and_teacher_labels():
     assert '"rollout_policy": "student"' in training_source
 
 
+def test_terrain_variants_change_exactly_one_thing_each():
+    """The friction and slope tasks must differ from flat in one dimension only.
+
+    Source-level, because the configs import Isaac Lab and cannot be built on CPU.
+    """
+    source = (JOSE_DIR / "ppo_walk" / "terrain_env_cfg.py").read_text(encoding="utf-8")
+
+    # Friction: the ranges widen, and nothing else in the events is restored.
+    assert '"static_friction_range": (0.3, 1.0)' in source
+    assert '"dynamic_friction_range": (0.3, 1.0)' in source
+    assert "add_base_mass" not in source
+    assert "push_robot" not in source
+
+    # Slope: slopes only. Anything discontinuous would need a height-scan
+    # observation, which would change the frozen 495-D layout.
+    assert "HfPyramidSlopedTerrainCfg" in source
+    assert "HfInvertedPyramidSlopedTerrainCfg" in source
+    for excluded in ("MeshPyramidStairsTerrainCfg", "MeshRandomGridTerrainCfg", "HfRandomUniformTerrainCfg"):
+        assert excluded not in source, f"{excluded} is not blind-walkable here"
+    # The scanner exists for the reward and the termination only. `mdp.height_scan`
+    # is the *observation* term; using it would add a policy input and break the
+    # frozen 495-D layout the estimator injects into.
+    assert "mdp.height_scan" not in source
+    assert "height_scan =" not in source
+
+    # The sloped scene keeps friction pinned, so terrain is its only variable.
+    assert source.count("static_friction=1.0") == 1
+
+    # Terrain generation is seeded, or it falls back to the global NumPy stream
+    # and the terrain differs between methods and between training seeds.
+    assert "seed=42," in source
+
+
+def test_slope_task_measures_falls_relative_to_the_ground():
+    """Isaac Lab's own fall rule is world-frame and documents itself as flat-only.
+
+    This terrain moves the ground by more than a metre, so reusing it would decide
+    survival by elevation. The paper's definition of a fall is kept and the
+    reference is made local instead.
+    """
+    upstream = (
+        Path("/home/mlcs/IsaacLab/source/isaaclab/isaaclab/envs/mdp/terminations.py")
+    )
+    if upstream.exists():
+        text = upstream.read_text(encoding="utf-8")
+        assert "This is currently only supported for flat terrains" in text
+
+    helper = (JOSE_DIR / "ppo_walk" / "mdp" / "terrain_mdp.py").read_text(encoding="utf-8")
+    assert "def root_height_below_minimum_terrain(" in helper
+    assert "root_pos_w[:, 2] - ground) < minimum_height" in helper
+
+    cfg = (JOSE_DIR / "ppo_walk" / "terrain_env_cfg.py").read_text(encoding="utf-8")
+    slope = cfg[cfg.index("class SlopeTerminationsCfg"):]
+    assert "terrain_mdp.root_height_below_minimum_terrain" in slope
+    # And the height *reward* has to use the same reference, or it charges the
+    # robot for the elevation of the ground it stands on.
+    rewards = cfg[cfg.index("class SlopeRewardsCfg"):cfg.index("class SlopeTerminationsCfg")]
+    assert 'sensor_cfg": SceneEntityCfg("height_scanner")' in rewards
+
+
+def test_terrain_tasks_are_registered_without_touching_the_fingerprinted_init():
+    """Adding ids to jose/__init__.py would rewrite four recorded task digests."""
+    root_init = (JOSE_DIR / "__init__.py").read_text(encoding="utf-8")
+    assert "Friction" not in root_init and "Slope" not in root_init
+
+    tasks = (JOSE_DIR / "ppo_walk" / "terrain_tasks.py").read_text(encoding="utf-8")
+    for task in (
+        "Isaac-G1-PPO-Walk-Friction-JOSE-v0",
+        "Isaac-G1-PPO-Walk-Friction-Estimator-JOSE-v0",
+        "Isaac-G1-PPO-Walk-Slope-JOSE-v0",
+        "Isaac-G1-PPO-Walk-Slope-Estimator-JOSE-v0",
+    ):
+        assert f'id="{task}"' in tasks
+
+    # Registering by entry-point string means importing this module pulls in no
+    # Isaac Lab, which is what makes it safe to import before AppLauncher runs.
+    assert "import isaaclab" not in tasks
+
+    for key in ("locomotion_friction", "locomotion_slope"):
+        assert key in ablation_catalog.TASKS
+        assert key in ablation_catalog.TASK_IMPLEMENTATION
+        # The "ppo_walk" adapter is what earns the command-grid evaluation:
+        # uses_locomotion_eval dispatches on the adapter, not the task id.
+        assert ablation_catalog.TASKS[key][1] == "ppo_walk"
+        for path in ablation_catalog.TASK_IMPLEMENTATION[key]:
+            assert (JOSE_DIR / path).exists(), path
+
+
+def test_adding_catalog_keys_leaves_existing_task_digests_untouched():
+    """A digest hashes only the tuple its own task names, so new keys are inert."""
+    flat = ablation_catalog.TASK_IMPLEMENTATION["locomotion"]
+    assert flat == (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+    )
+    # The variants inherit every file of the flat task, so a change to the base
+    # config invalidates them too, and add only what makes them different.
+    for key in ("locomotion_friction", "locomotion_slope"):
+        assert set(flat).issubset(ablation_catalog.TASK_IMPLEMENTATION[key])
+        assert "ppo_walk/terrain_env_cfg.py" in ablation_catalog.TASK_IMPLEMENTATION[key]
+
+
+def test_imu_input_is_an_input_only_option_and_defaults_off():
+    """JOSE+IMU must vary what the estimator reads and nothing else."""
+    adapters = (JOSE_DIR / "estimator" / "adapters.py").read_text(encoding="utf-8")
+    assert "use_imu: bool = False" in adapters
+    assert "IMU_INPUT_DIM = 6" in adapters
+    assert "self.IMU_INPUT_DIM if self.use_imu else 0" in adapters
+    # The six channels are the ones SET reads, appended after the joints so the
+    # joint block keeps the indices it has without them.
+    assert 'sensors["angular_velocity"], sensors["projected_gravity"]' in adapters
+    # The target, the injection indices and the policy observation are untouched.
+    assert "estimator_target_indices" not in adapters.split("def estimator_input")[1].split("def estimator_target")[0]
+
+    trainer = (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
+    assert '"--imu-input", "--imu_input", dest="imu_input", action="store_true"' in trainer
+    # Part of the dataset cache identity: the two input sets differ only in frame
+    # width, so a cache built without the IMU must not be readable by a run with it.
+    # The one combination that cannot work is refused outright rather than
+    # silently mis-sliced: project_joint_history assumes a joints-only frame and
+    # derives the joint count as input_dim // 2, which the six IMU channels break.
+    assert "if args_cli.imu_input and args_cli.dataset_cache:" in trainer
+    assert "cannot be combined with --dataset-cache" in trainer
+
+    # And `cache_metadata` must NOT carry the flag. That dict is compared for
+    # exact equality against the metadata stored beside a cache, so adding a key
+    # invalidates every cache already on disk -- and 264 of the recorded runs used
+    # `--dataset-cache`. The guard above is what keeps the two input sets apart;
+    # the metadata does not need to, and cannot afford to.
+    cache_block = trainer[trainer.index("cache_metadata = {"):trainer.index("dataset = None")]
+    live = "\n".join(
+        line for line in cache_block.splitlines() if not line.strip().startswith("#")
+    )
+    assert '"imu_input"' not in live, "adding a key here rejects every cache on disk"
+
+
+def test_set_dagger_is_opt_in_and_matches_joses_schedule():
+    """SET as published must still be what the default invocation produces."""
+    trainer = (JOSE_DIR / "train_set_baseline.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--dagger-rounds", type=int, default=0)' in trainer
+    # The arm names itself in the artifact, so a SET+DAgger run can never be
+    # mistaken for SET when the rows are merged.
+    assert '"offline_expert_rollout_then_dagger"' in trainer
+    # Same round-selection key as JOSE, or the two arms report different rounds
+    # for different reasons.
+    assert '(-result["track_error_norm"], -result["death_rate"], -result["rmse"])' in trainer
+    jose_trainer = (JOSE_DIR / "train_state_estimator.py").read_text(encoding="utf-8")
+    assert '(-result["track_error_norm"], -result["death_rate"], -result["rmse"])' in jose_trainer
+
+    # Checked by source: importing this module pulls in Isaac Lab, which the CPU
+    # test environment does not have.
+    source = (JOSE_DIR / "set_baseline" / "dagger.py").read_text(encoding="utf-8")
+    assert "def estimator_ratio_for(" in source
+    assert "progress = (round_index - 1) / (rounds - 1)" in source
+    assert "initial + (final - initial) * progress" in source
+    # Labels are the expert's, at the state the learner reached. That is DAgger.
+    assert "collection_protocol\": \"on_policy_dagger_rollout" in source
+
+
+def test_running_normalizer_state_dict_aliases_the_live_tensors():
+    """The reason ``_snapshot`` in train_history_student.py has to clone.
+
+    ``RunningNormalizer.state_dict`` ends in ``.detach().cpu()``. For a normalizer
+    already on the CPU that is a no-op returning the *live* tensor, and ``update``
+    writes the mean in place, so a snapshot taken without cloning silently tracks
+    every later update.
+    """
+    normalizer = models.RunningNormalizer(2, "cpu")
+    normalizer.update(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+
+    naive = normalizer.state_dict()
+    cloned = {
+        name: (value.clone() if isinstance(value, torch.Tensor) else value)
+        for name, value in normalizer.state_dict().items()
+    }
+    before = cloned["mean"].clone()
+
+    normalizer.update(torch.tensor([[100.0, 200.0], [300.0, 400.0]]))
+
+    assert not torch.equal(naive["mean"], before), "state_dict() handed back the live tensor"
+    assert torch.equal(cloned["mean"], before), "the clone must not follow later updates"
+
+
+def test_best_state_snapshot_carries_both_normalizers():
+    """Regression guard for the bug fixed in e0ce15e.
+
+    ``best_state`` used to clone ``student.state_dict()`` alone. The two
+    normalizers live outside the module, so restoring only the weights paired the
+    best checkpoint with the final normalizers -- a policy that was never saved and
+    never deployed. The saved checkpoint always held all three; only the in-memory
+    restore was wrong, which is what the end-of-run metrics were taken from.
+    """
+    source = (JOSE_DIR / "train_history_student.py").read_text(encoding="utf-8")
+
+    assert '"observation_normalizer": _snapshot(observation_normalizer),' in source
+    assert '"action_normalizer": _snapshot(action_normalizer),' in source
+    assert 'student.load_state_dict(best_state["model"])' in source
+    assert 'observation_normalizer.load_state_dict(best_state["observation_normalizer"])' in source
+    assert 'action_normalizer.load_state_dict(best_state["action_normalizer"])' in source
+    # The clone is load-bearing, not decorative -- see the test above.
+    assert "value.clone() if isinstance(value, torch.Tensor) else value" in source
+
+
+def test_student_trainer_seeds_every_stream_and_freezes_eval_rng():
+    """H1 and H2: the student trainer must not be seeded more weakly than the
+    methods it is compared against, and its metric-only evaluations must not
+    advance the stream training draws from.
+
+    Only the ``imu`` arm runs the second, clean evaluation, so an unfrozen eval
+    makes the two arms diverge at an identical seed.
+    """
+    source = (JOSE_DIR / "train_history_student.py").read_text(encoding="utf-8")
+
+    assert "random.seed(args_cli.seed)" in source
+    assert "np.random.seed(args_cli.seed)" in source
+    assert "torch.manual_seed(args_cli.seed)" in source
+
+    eval_block = source.split("if iteration % args_cli.eval_interval == 0")[1][:900]
+    assert "with frozen_rng():" in eval_block
+    assert eval_block.index("with frozen_rng():") < eval_block.index("corrupted = evaluate(True)")
+
+    for trainer in ("train_state_estimator.py", "train_set_baseline.py"):
+        peer = (JOSE_DIR / trainer).read_text(encoding="utf-8")
+        assert "np.random.seed" in peer, f"{trainer} is the precedent this matches"
+
+
 def test_dagger_student_normalizer_and_replay_buffer():
     student = models.DaggerStudent()
     assert student(torch.randn(4, 58)).shape == (4, 29)

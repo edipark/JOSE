@@ -266,6 +266,13 @@ def main(env_cfg, agent_cfg):
                 if metrics["episode_length_mean"] > best_episode_length:
                     best_episode_length = metrics["episode_length_mean"]
                     best_iteration = iteration
+                    # Unlike train_history_student.py this keeps no in-memory
+                    # `best_state` and needs none: `metrics` was measured live at
+                    # this iteration, with the normalizers this checkpoint is
+                    # saved beside, and nothing is measured after the loop. The
+                    # normalizer-restore bug fixed in e0ce15e cannot arise here
+                    # because there is no restore. Adding a post-loop measurement
+                    # would reintroduce it -- snapshot both normalizers if you do.
                     best_metrics = dict(metrics)
                     save_checkpoint(iteration, best_metrics=metrics)
     finally:

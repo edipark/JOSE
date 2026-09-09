@@ -28,6 +28,13 @@ parser.add_argument("--task", default="Isaac-G1-AMP-Walk-JOSE-Direct-v0")
 parser.add_argument("--agent_cfg_entry_point", "--agent", dest="agent", default="skrl_amp_cfg_entry_point")
 parser.add_argument("--adapter", choices=("amp", "ppo_walk"), default="amp")
 parser.add_argument("--joint_preset", "--joint-preset", dest="joint_preset", choices=("all", "legs", "upper"), default="all")
+parser.add_argument(
+    "--imu-input", "--imu_input", dest="imu_input", action="store_true",
+    help="Append body angular velocity and projected gravity to the estimator input "
+    "(the JOSE+IMU arm). The regression target, the injection indices and the policy "
+    "observation are unchanged, so this varies what the estimator reads and nothing "
+    "else. Off by default: every result in the paper is joint-encoders-only.",
+)
 parser.add_argument("--est_type", "--estimator", dest="estimator", choices=("LSTM", "TCN", "MLP", "HISTORY_MLP"), default="LSTM")
 parser.add_argument(
     "--window", type=int, default=25,
@@ -112,6 +119,19 @@ from jose.teacher_setup import build_env_and_teacher, teacher_policy_module
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg, agent_cfg):
+    if args_cli.imu_input and args_cli.dataset_cache:
+        # `RolloutDataset.project_joint_history` documents its assumption: the
+        # frame is all joint positions followed by all joint velocities. With
+        # --imu-input the frame carries six inertial channels after those, so the
+        # projection would slice the wrong columns -- and silently, since
+        # `full_joint_count` is derived as `input_dim // 2` and would come out 32
+        # instead of 29. Refuse the combination rather than support it: nothing
+        # needs it, and a cache is a speed-up, never a result.
+        raise ValueError(
+            "--imu-input cannot be combined with --dataset-cache: the cache "
+            "projection assumes a joints-only frame layout. Collect without the "
+            "cache, or extend project_joint_history to preserve the IMU tail."
+        )
     torch.manual_seed(args_cli.seed)
     np.random.seed(args_cli.seed)
     env_cfg.scene.num_envs = args_cli.num_envs
@@ -127,12 +147,16 @@ def main(env_cfg, agent_cfg):
         args_cli.device,
         seed=args_cli.seed,
     )
-    adapter = make_policy_adapter(args_cli.adapter, env, args_cli.joint_preset)
+    adapter = make_policy_adapter(args_cli.adapter, env, args_cli.joint_preset, args_cli.imu_input)
     window = 1 if args_cli.estimator == "MLP" else args_cli.window
     cache_window = args_cli.dataset_cache_window or window
     if cache_window < window:
         raise ValueError("--dataset-cache-window cannot be smaller than the estimator window")
-    cache_adapter = make_policy_adapter(args_cli.adapter, env, "all") if args_cli.dataset_cache else adapter
+    cache_adapter = (
+        make_policy_adapter(args_cli.adapter, env, "all", args_cli.imu_input)
+        if args_cli.dataset_cache
+        else adapter
+    )
     estimator = build_estimator(
         args_cli.estimator, adapter.input_dim, adapter.schema.estimator_target_dim,
         args_cli.hidden_size, args_cli.num_layers, tuple(args_cli.tcn_channels), window,
@@ -163,6 +187,7 @@ def main(env_cfg, agent_cfg):
         "estimator": args_cli.estimator,
         "window": window,
         "joint_preset": args_cli.joint_preset,
+        "imu_input": args_cli.imu_input,
         "hidden_size": args_cli.hidden_size,
         "num_layers": args_cli.num_layers,
         "tcn_channels": list(args_cli.tcn_channels),
@@ -208,6 +233,13 @@ def main(env_cfg, agent_cfg):
         "task": args_cli.task,
         "adapter": args_cli.adapter,
         "joint_preset": "all" if args_cli.dataset_cache else args_cli.joint_preset,
+        # Deliberately NOT carrying `imu_input`. This dict is compared for exact
+        # equality against the metadata stored beside a cache, so adding a key
+        # invalidates every cache already on disk -- 21 of them, feeding the 264
+        # recorded runs that used `--dataset-cache`. The IMU input set is kept out
+        # of the cache by the hard guard at the top of main() instead, which is the
+        # stronger protection anyway: the combination is refused rather than
+        # merely distinguished.
         "window": cache_window,
         "seed": args_cli.seed,
         "collect_steps": args_cli.collect_steps,
@@ -495,6 +527,20 @@ def main(env_cfg, agent_cfg):
         args_cli.device,
         adapter.schema.estimator_target_names,
     )
+    # Keep the open-loop numbers under their own names before the closed-loop
+    # dict overwrites `rmse` and `target_rmse`. Without this the open-loop figure
+    # is computed and then silently lost, and JOSE's `rmse` cannot be told apart
+    # from SET's -- which reports closed-loop under the same key while keeping its
+    # open-loop value as `open_loop_rmse`. Matching that naming is what lets the
+    # two families be put in one table.
+    #
+    # Note what this open-loop set is: `evaluation_data` above is collected at
+    # `estimator_ratio=1.0`, so it is prediction error on the states the estimator
+    # itself induces, not on the distribution it was fitted to. SET's counterpart
+    # is measured on its own training set. The two are not the same quantity and
+    # must not be differenced across families.
+    metrics["open_loop_rmse"] = metrics.get("rmse")
+    metrics["open_loop_r2"] = metrics.get("r2")
     metrics.update(rounds[best_round]["evaluation"])
     metrics["estimator_parameters"] = metrics["parameters"]
     policy = teacher_policy_module(teacher_agent)
