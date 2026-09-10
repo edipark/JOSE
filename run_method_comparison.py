@@ -199,6 +199,32 @@ def _metrics(path: Path) -> dict:
     return {key: value for key, value in metrics.items() if isinstance(value, (int, float, list, dict, bool))}
 
 
+#: Child processes resolve ``--task`` through the gymnasium registry, but the
+#: terrain ids are registered by ``jose/ppo_walk/__init__.py`` and none of the
+#: child scripts import that package -- they reach for ``jose.estimator.*`` and
+#: ``jose.teacher_setup`` only. Without this the terrain variants die at startup
+#: with ``NameNotFound``, and Isaac Sim still exits 0, so the row is recorded
+#: ``"ok"`` with empty metrics rather than ``"failed"``.
+#:
+#: Injected here, in the runners, rather than in the child scripts: every module
+#: they share (``evaluate_teacher.py``, ``estimator/adapters.py``, ``schema.py``,
+#: ``__init__.py``) sits in a fingerprint tuple, so importing from one of those
+#: would change the implementation digest of every study already recorded. These
+#: two runners are in no tuple.
+#:
+#: Safe before ``AppLauncher``: ``jose.ppo_walk`` imports gymnasium and registers
+#: by entry-point string, pulling in no Isaac Lab module at import time.
+_TASK_REGISTRY_BOOTSTRAP = (
+    "import runpy, sys; import jose.ppo_walk; "
+    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
+)
+
+
+def _child_python(script) -> list[str]:
+    """``python -c <bootstrap> <script>`` -- the child still sees ``script`` as argv[0]."""
+    return [sys.executable, "-c", _TASK_REGISTRY_BOOTSTRAP, str(script)]
+
+
 def _method_output(method: str, task: str, seed: int, run_root: Path) -> Path:
     output = run_root / "methods" / METHOD_SLUGS[method]
     if method in ("IMU-BasedDistillation", "Joint-OnlyDistillation", "JOSE"):
@@ -228,7 +254,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
     adapter, agent = TASK_ADAPTERS[task]
     if method == "PrivilegedTeacher":
         command = [
-            sys.executable, str(root / "evaluate_teacher.py"), "--teacher-checkpoint", teacher,
+            *_child_python(root / "evaluate_teacher.py"), "--teacher-checkpoint", teacher,
             "--task", task, "--agent", agent, "--adapter", adapter,
             "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--output-dir", str(output.parent),
@@ -237,7 +263,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
     elif method in ("IMU-BasedDistillation", "Joint-OnlyDistillation"):
         script = "train_imu_distillation.py" if method.startswith("IMU") else "train_joint_only_distillation.py"
         command = [
-            sys.executable, str(root / script), *common_student, "--adapter", adapter,
+            *_child_python(root / script), *common_student, "--adapter", adapter,
             # Same dataset cap as the estimator, and the same reservoir eviction
             # behind it (estimator/models.py:ReplayBuffer), so "how much data the
             # method gets to learn from" isn't a confound either.
@@ -246,7 +272,7 @@ def _command(method: str, task: str, teacher: str, seed: int, args, run_root: Pa
         ]
     else:
         command = [
-            sys.executable, str(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
+            *_child_python(root / "train_state_estimator.py"), "--teacher-checkpoint", teacher,
             "--task", task, "--adapter", adapter, "--seed", str(seed), "--num-envs", str(args.num_envs),
             "--collect-steps", str(args.collect_steps), "--epochs", str(args.estimator_epochs),
             "--dagger-rounds", str(args.estimator_dagger_rounds),
