@@ -18,3 +18,5 @@ from . import terrain_tasks  # noqa: F401,E402
 # The push-disturbed ids, kept out of ``terrain_tasks`` because that file is
 # hashed into the two terrain tuples. Same import-time guarantee as above.
 from . import push_tasks  # noqa: F401,E402
+# The sloped task with pinned levels, one id per K (student pipeline only).
+from . import slope_fixed_tasks  # noqa: F401,E402

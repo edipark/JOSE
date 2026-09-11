@@ -226,3 +226,17 @@ PCIe가 gen4 가능한데 gen1로 링크돼 있습니다. 둘 다 root 권한이
 `collect_terrain_results.sh`는 git으로 오지 않습니다.** 문서 §1 "무엇을 받아야 하나"에
 `git clone` + `usd/` + `motions/`만 적혀 있는데, 이 두 스크립트도 목록에 넣어야 합니다.
 처음 실행 시 이것 때문에 막혔습니다.
+
+---
+
+## 8. 후속 조치 (이쪽에서, `main`에 반영)
+
+| 항목 | 처리 |
+|---|---|
+| §1 task id 등록 | 그대로 `main`에 병합 |
+| §2.1 실패가 `ok`로 기록 | **수정.** 두 러너 모두 metrics가 비면 `failed`로 기록하고 재개 때 다시 돌림 |
+| §2.2 `terrain_tasks.py` docstring | 그대로 둠 — 그 파일은 두 지형 튜플에 들어 있어 고치면 기록된 digest가 움직임 |
+| §2.3 프리플라이트 | 그대로 둠 |
+| §3 게이트 5/6 | **평지 teacher도 같은 체크에서 실패합니다** (`cmdfix_v1` teacher 행, 시드 42/43/44에서 2.245 / 2.245 / 2.242 lifts/s). 지형 변형의 회귀가 아니라 레시피의 성질이라, 스크립트가 이 체크 하나만 `KNOWN`으로 허용하고 나머지 5개는 계속 막습니다 (`KNOWN_GATE_FAILURES`) |
+| §5.3 teacher MPJPE 5 m | 속도 적분이 아니라 **평가 중에 켜진 지형 커리큘럼** 때문입니다. teacher 행의 root 오차 ≈ mpjpe_g, local 1.4 mm — 두 롤아웃이 다른 타일에서 시작한 것. 같은 원인으로 방법마다 다른 경사에서 평가됐으므로, 커리큘럼을 끄고 레벨을 고정한 `slope_fixed` 변형을 추가했습니다 (`docs/REMOTE_TERRAIN_STUDY.md` §6) |
+| §7 스크립트 전달 | 두 스크립트를 git이 추적하는 `scripts/`로 옮김. `git pull`로 옵니다 |

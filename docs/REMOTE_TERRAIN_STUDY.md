@@ -88,7 +88,8 @@ teacher 체크포인트는 **보내지 않습니다.** 이 스터디는 자기 t
 
 Python 소스에는 절대경로가 하나도 없습니다 (grep으로 확인). `logs/jose_g1/`의 셸
 드라이버들은 대부분 절대경로를 박고 있지만, **이 스터디용 스크립트 두 개는 환경변수를
-받도록 새로 썼습니다.**
+받도록 새로 썼고, git이 추적하는 `scripts/`에 있습니다.** (처음엔 gitignore인
+`logs/jose_g1/`에 있어서 `git clone`으로 오지 않았습니다 — `docs/TERRAIN_RUN_NOTES.md` §7.)
 
 실행은 `python -m jose.<모듈>` 또는 저장소 루트에서 `python <스크립트>.py`로 하세요.
 옛 드라이버에 보이는 `python -m JOSE.<모듈>`(대문자)은 체크아웃 디렉터리 이름이 `JOSE`이고
@@ -104,8 +105,8 @@ Python 소스에는 절대경로가 하나도 없습니다 (grep으로 확인). 
 ```bash
 export JOSE_PY=/path/to/envs/jose/bin/python
 
-VARIANT=slope    bash logs/jose_g1/run_terrain_study.sh
-VARIANT=friction bash logs/jose_g1/run_terrain_study.sh
+VARIANT=slope    bash scripts/run_terrain_study.sh
+VARIANT=friction bash scripts/run_terrain_study.sh
 ```
 
 변형마다 4단계이고 각 단계에서 재개됩니다. 이미 있는 teacher 체크포인트는 재학습하지
@@ -148,7 +149,7 @@ $JOSE_PY train_ppo_walk.py --task Isaac-G1-PPO-Walk-Slope-JOSE-v0 \
 ## 3. 결과 보내기
 
 ```bash
-VARIANT=all bash logs/jose_g1/collect_terrain_results.sh
+VARIANT=all bash scripts/collect_terrain_results.sh
 ```
 
 tarball 하나가 나옵니다 — 결과·리포트·매니페스트, teacher 체크포인트 두 개, 드라이버
@@ -208,3 +209,52 @@ docstring에 *"평지에서만 지원됨"*이라고 적혀 있습니다. 이 지
 단언하는 495차원 레이아웃이 깨지고, 그러면 추정기 주입 인덱스가, 즉 논문 전체가 다루는
 그 인터페이스가 달라집니다. 계단이나 random height field 대신 경사면을 고른 이유이기도
 합니다. 경사면은 국소적으로 평평해서 관측을 안 바꾸고도 blind 정책이 걸어갑니다.
+
+---
+
+## 6. 추가 실행 — 고정 난이도 경사 (`slope_fixed`)
+
+**왜.** 첫 경사 스터디는 학생 파이프라인의 수집·평가 내내 지형 커리큘럼이 켜져 있었습니다
+(방법 비교 12개 job 로그 전부에 `Active Curriculum Terms: terrain_levels`). 자식 스크립트가
+play 설정이 아니라 학습 설정으로 환경을 만들기 때문입니다. 커리큘럼은 리셋마다 넘어진
+env를 완만한 경사로, 멀리 걸은 env를 가파른 경사로 옮기므로, **방법마다 다른 지형에서
+평가**됐습니다 — 격차를 줄이는 방향이라 순서는 보수적이지만 크기는 인용하기 어렵습니다.
+
+**무엇이 다른가.** teacher는 그대로입니다(재학습 없음, 기존 경사 teacher 재사용). 학생
+파이프라인 전체 — 수집과 모든 평가 — 에서 커리큘럼 항목을 없애고, env마다 레벨 `0..K`를
+env 번호로 돌아가며 한 번 배정해 끝까지 고정합니다(`ppo_walk/slope_fixed_env_cfg.py`).
+지형은 같은 생성기, 같은 고정 시드라 레벨의 의미(경사 구간)가 teacher 때와 같습니다.
+그래서 모든 방법·모든 시드가 같은 경사 구성에서 학습하고 평가받으며, 평가에 나오는 경사는
+전부 학습 때 본 경사입니다.
+
+**K는 어떻게 정하나.** 학생을 학습하기 전에 `eval_slope_levels.py`가 teacher를 레벨마다
+**teacher 행과 같은 방식**(`collect_rollout`, 256 env × 2000 step, 환경 자체의 명령
+재샘플링)으로 재고, *모든 레벨 0..K에서 teacher death_rate ≤ `MAX_DEATH_RATE`(기본 0.5%)*인
+최대 K를 고릅니다. 누적 규칙이라 중간 레벨 하나가 우연히 통과해도 건너뛰지 않습니다. 측정은
+`logs/jose_g1/terrain_slope_fixed/teacher_levels.json`에 남고, 재실행하면 재사용됩니다.
+
+```bash
+cd <JOSE 체크아웃>
+git checkout main && git pull
+export JOSE_PY=/path/to/envs/jose/bin/python
+
+VARIANT=slope_fixed bash scripts/run_terrain_study.sh      # MAX_DEATH_RATE 기본 0.5
+VARIANT=slope_fixed bash scripts/collect_terrain_results.sh
+```
+
+**0.5%인 이유 — 이쪽 머신에서 같은 teacher로 먼저 재 봤습니다** (레벨당 512 에피소드):
+
+| 레벨 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 넘어진 에피소드 | 1 | 2 | 0 | 2 | 0 | 1 | 0 | 4 | 10 | 25 |
+| death_rate (%) | 0.20 | 0.39 | 0 | 0.39 | 0 | 0.20 | 0 | 0.78 | 1.95 | 4.88 |
+
+가장 완만한 레벨 0에서도 1개가 넘어지므로 0%로는 아무 레벨도 고를 수 없습니다. 레벨 6까지는
+경사와 무관하게 0~2개로 오르내리다가 레벨 7부터 늘어납니다. 0.5%(512개 중 2개 이하)는 그
+바닥 위, 첫 상승 아래이고, 이 측정이면 **K = 6**(경사 약 0~0.28)입니다. 그쪽 측정은 GPU가
+달라 한두 개씩 다를 수 있고, 그래서 규칙을 고정해 두고 K는 그쪽 측정으로 정합니다.
+
+단계는 1(teacher 재사용) → 2(게이트) → **2b(레벨 측정, 약 35분)** → 3(방법 비교) →
+4(SET)입니다. 경사 teacher는 `logs/rsl_rl/isaac_g1_ppo_walk_slope_jose_v0/`에서 자동으로
+찾습니다. 게이트의 제자리걸음 체크는 알려진 실패로 허용됩니다(평지 teacher도 같은 성질,
+`docs/TERRAIN_RUN_NOTES.md` §3).

@@ -52,6 +52,11 @@ TASKS = {
     "locomotion_friction": CATALOG_TASK_REGISTRY["locomotion_friction"][0],
     "locomotion_slope": CATALOG_TASK_REGISTRY["locomotion_slope"][0],
     "locomotion_push": CATALOG_TASK_REGISTRY["locomotion_push"][0],
+    **{
+        key: entry[0]
+        for key, entry in CATALOG_TASK_REGISTRY.items()
+        if key.startswith("locomotion_slope_fixed_l")
+    },
 }
 # Gym task id -> (estimator adapter kind, agent config entry point), so the
 # teacher/estimator/student commands below stay correct for a non-AMP task

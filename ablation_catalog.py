@@ -107,6 +107,18 @@ TASKS = {
         "ppo_walk",
         "rsl_rl_cfg_entry_point",
     ),
+    # The sloped task for the student pipeline, curriculum removed and levels
+    # 0..K pinned by environment index -- one key per K, chosen by
+    # eval_slope_levels.py. Definitions in ppo_walk/slope_fixed_env_cfg.py, ids in
+    # ppo_walk/slope_fixed_tasks.py.
+    **{
+        f"locomotion_slope_fixed_l{level}": (
+            f"Isaac-G1-PPO-Walk-SlopeFixed-L{level}-Estimator-JOSE-v0",
+            "ppo_walk",
+            "rsl_rl_cfg_entry_point",
+        )
+        for level in range(10)
+    },
 }
 
 TRAINING_IMPLEMENTATION = (
@@ -199,6 +211,25 @@ TASK_IMPLEMENTATION = {
         "ppo_walk/push_env_cfg.py",
         "ppo_walk/push_tasks.py",
     ),
+    # The slope tuple plus the three files that pin the levels.
+    **{
+        f"locomotion_slope_fixed_l{level}": (
+            "__init__.py",
+            "ppo_walk/g1_asset.py",
+            "ppo_walk/walk_env_cfg.py",
+            "ppo_walk/walk_estimator_env_cfg.py",
+            "ppo_walk/walk_estimator_env.py",
+            "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+            "ppo_walk/mdp/rewards.py",
+            "ppo_walk/terrain_env_cfg.py",
+            "ppo_walk/terrain_tasks.py",
+            "ppo_walk/mdp/terrain_mdp.py",
+            "ppo_walk/slope_fixed_env_cfg.py",
+            "ppo_walk/slope_fixed_tasks.py",
+            "ppo_walk/fixed_levels.py",
+        )
+        for level in range(10)
+    },
 }
 
 
