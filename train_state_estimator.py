@@ -35,6 +35,15 @@ parser.add_argument(
     "observation are unchanged, so this varies what the estimator reads and nothing "
     "else. Off by default: every result in the paper is joint-encoders-only.",
 )
+parser.add_argument(
+    "--imu-noise-scale", "--imu_noise_scale", dest="imu_noise_scale", type=float, default=0.0,
+    help="Train against a degraded IMU, as a multiple of the nominal model in "
+    "distillation/imu.py (gyro white noise, a per-episode gyro bias, an attitude "
+    "tilt, and up to two steps of staleness). 1.0 is the scale the recorded "
+    "set_imu_noise arm used and the 1x point of the degradation axis, so an arm "
+    "trained here is comparable to both. 0 disables it, which is every paper "
+    "result. Requires --imu-input: there is nothing to degrade otherwise.",
+)
 parser.add_argument("--est_type", "--estimator", dest="estimator", choices=("LSTM", "TCN", "MLP", "HISTORY_MLP"), default="LSTM")
 parser.add_argument(
     "--window", type=int, default=25,
@@ -132,6 +141,19 @@ def main(env_cfg, agent_cfg):
             "projection assumes a joints-only frame layout. Collect without the "
             "cache, or extend project_joint_history to preserve the IMU tail."
         )
+    if args_cli.imu_noise_scale > 0.0 and not args_cli.imu_input:
+        # Silently training a joint-only arm with the flag set would produce a
+        # run that is labelled randomized, is identical to the clean arm, and
+        # would sit in the DR column of a plot saying randomization does nothing.
+        raise ValueError(
+            "--imu-noise-scale needs --imu-input: the estimator reads no inertial "
+            "channels without it, so there is nothing for the noise to reach."
+        )
+    if args_cli.imu_noise_scale > 0.0 and args_cli.dataset_cache:
+        raise ValueError(
+            "--imu-noise-scale cannot be combined with --dataset-cache: a cached "
+            "dataset was collected under whatever sensor the caching run had."
+        )
     torch.manual_seed(args_cli.seed)
     np.random.seed(args_cli.seed)
     env_cfg.scene.num_envs = args_cli.num_envs
@@ -148,6 +170,20 @@ def main(env_cfg, agent_cfg):
         seed=args_cli.seed,
     )
     adapter = make_policy_adapter(args_cli.adapter, env, args_cli.joint_preset, args_cli.imu_input)
+    # The randomized JOSE+IMU arm. The corruptor is installed on the environment,
+    # so nothing downstream can read around it, and a handle is left on the
+    # adapter under the name SET already uses -- that is what the reset hooks in
+    # estimator/pipeline.py look for when an episode ends.
+    if args_cli.imu_noise_scale > 0.0:
+        from jose.distillation.imu import SensorCorruptionCfg, SensorCorruptor
+        from jose.robustness.noise import patch_imu_noise, scaled_imu_cfg
+
+        adapter.imu_corruptor = SensorCorruptor(
+            args_cli.num_envs, args_cli.device,
+            scaled_imu_cfg(SensorCorruptionCfg(), args_cli.imu_noise_scale),
+        )
+        patch_imu_noise(adapter.core_env, adapter.imu_corruptor)
+        print(f"[jose] IMU randomization at {args_cli.imu_noise_scale}x nominal", flush=True)
     window = 1 if args_cli.estimator == "MLP" else args_cli.window
     cache_window = args_cli.dataset_cache_window or window
     if cache_window < window:
@@ -188,6 +224,7 @@ def main(env_cfg, agent_cfg):
         "window": window,
         "joint_preset": args_cli.joint_preset,
         "imu_input": args_cli.imu_input,
+        "imu_noise_scale": args_cli.imu_noise_scale,
         "hidden_size": args_cli.hidden_size,
         "num_layers": args_cli.num_layers,
         "tcn_channels": list(args_cli.tcn_channels),

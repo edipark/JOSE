@@ -69,17 +69,46 @@ EXPECTED = {
         },
     },
     "set": {
-        "source": "logs/jose_g1/set_baseline/2026-09-04_11-44-46/locomotion"
-                  "/methods/set/context_20/seed_42/training.json",
+        # `track_error_norm` below is NOT the value in the 2026-09-04 run that
+        # produced the paper's SET row. That run predates 59d5e17, which fixed
+        # three CommandEvaluator bugs and, in passing, swapped the order of the
+        # survivor mask and the column slice:
+        #
+        #     old:  rmse = sqrt(...)[valid]   then  float(rmse[:, 0].mean())
+        #     new:  survivor_mean(rmse_all[:, 0])  ==  rmse_all[:, 0][valid].mean()
+        #
+        # Same numbers, same count -- but one reduction runs over a stride-3 view
+        # and the other over a contiguous one, so torch splits the sum differently
+        # and the result moves by one float32 ulp. Measured on 2026-09-09: 18 of
+        # the 45 per-command RMSE fields moved by exactly +-1 ulp; all 45
+        # per-command *bias* fields did not (their subtraction builds a contiguous
+        # temporary either way); the trained weights are bit-identical across all
+        # 1,204,013 parameters. Nothing dies in this run (grid_survival_rate 1.0),
+        # so the bug fixes are semantic no-ops here and only the rounding differs.
+        #
+        # Gating on the 09-04 value would therefore fail for every build after
+        # 2026-09-07 whether or not this study existed, which is not the question
+        # this gate asks. The reference is the build immediately BEFORE this study
+        # (e0ce15e = b1509b4^, re-run from a worktree on 2026-09-09), so a mismatch
+        # means *this* study's changes moved something.
+        #
+        # Pre-59d5e17 value, kept for provenance:
+        #     track_error_norm = 0.06190768314732445
+        #     from logs/jose_g1/set_baseline/2026-09-04_11-44-46/locomotion
+        #          /methods/set/context_20/seed_42/training.json
+        "source": "logs/jose_g1/training_imu_study/gate_set_oldbuild/training.json"
+                  "  (e0ce15e = b1509b4^, the build before this study -- see note above)",
         "command": (
             "python train_set_baseline.py --task Isaac-G1-PPO-Walk-Estimator-JOSE-v0 "
             "--adapter ppo_walk --teacher-checkpoint <flat teacher model_4999.pt> "
             "--context 20 --blocks 6 --width 128 --heads 4 --dropout 0.1 "
             "--imu-noise-scale 0.0 --dagger-rounds 0 --num-envs 256 --seed 42 --headless"
+            "  (the reference run predates --dagger-rounds and simply omits it;"
+            " its default is 0, which is the same executed path)"
         ),
         "metrics": {
             "rmse": 0.020385736599564552,
-            "track_error_norm": 0.06190768314732445,
+            "track_error_norm": 0.061907683312892904,
             "episode_length_mean": 1000.0,
             "grid_survival_rate": 1.0,
             "death_rate": 0.0,

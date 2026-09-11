@@ -104,6 +104,14 @@ def summarize(metrics: dict) -> dict:
     row = {
         # -- closed-loop control
         "survival": metrics.get("grid_survival_rate"),
+        # Table I(b)'s `Surv. (%)`, recovered on its own terms: the fraction of
+        # episodes that did not terminate early, from the same 200-episode
+        # rollout `ep_len` comes from, where the task's sampler re-draws the
+        # command mid-episode. Reported beside the grid figure rather than
+        # instead of it -- the grid holds one command for four seconds and cannot
+        # see a failure that arrives at step 582, which is where JOSE's single
+        # lost episode out of 600 actually ended.
+        "surv_ep": None if metrics.get("death_rate") is None else 100.0 - metrics["death_rate"],
         "ep_len": metrics.get("episode_length_mean"),
         "track": metrics.get("track_error_norm"),
         "track_vx": metrics.get("track_vx_rmse"),
@@ -221,6 +229,90 @@ def check_gates(strict: bool) -> None:
         print(f"WARNING: provisional -- inertness gate not run ({', '.join(missing)})\n")
 
 
+#: The IMU degradation axis. Two files: the seven arms measured by
+#: run_robustness_cmdfix.sh (the paper's Fig. 4/5 source, never written to here)
+#: and the four cells this study added, in a sibling file.
+AXIS_FILES = (
+    ROOT / "logs/jose_g1/robustness_cmdfix/imu_axis.jsonl",
+    ROOT / "logs/jose_g1/robustness_cmdfix/imu_axis_study2.jsonl",
+)
+AXIS_SCALES = (0.0, 1.0, 2.0, 4.0)
+#: Ordered for reading, not alphabetically: the two flat references first, then
+#: each IMU arm beside the randomized version of itself.
+AXIS_ARMS = (
+    ("teacher", "Teacher (privileged)"),
+    ("jose", "JOSE (joint-only)"),
+    ("joint_only", "Joint-only distill."),
+    ("jose_imu", "JOSE+IMU"),
+    ("jose_imu_dr", "JOSE+IMU + DR"),
+    ("set_dagger", "SET+DAgger"),
+    ("set_dagger_dr", "SET+DAgger + DR"),
+    ("set", "SET"),
+    ("set_imu_dr", "SET + DR"),
+    ("imu_clean", "Distillation"),
+    ("imu_dr", "Distillation + DR"),
+)
+
+
+def imu_axis_rows():
+    """``{(method, scale): {metric: [per-seed values]}}`` across both axis files."""
+    out = {}
+    for path in AXIS_FILES:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            bucket = out.setdefault((row["method"], row["scale"]), {"track": [], "surv": []})
+            metrics = row["metrics"]
+            if metrics.get("track_error_norm") is not None:
+                bucket["track"].append(metrics["track_error_norm"])
+            if metrics.get("grid_survival_rate") is not None:
+                bucket["surv"].append(metrics["grid_survival_rate"])
+    return out
+
+
+def imu_axis_block(axis):
+    """The degradation table, or a note saying why there isn't one."""
+    if not axis:
+        return ["", "## IMU degradation axis", "",
+                "Not measured: no rows under logs/jose_g1/robustness_cmdfix.", ""]
+
+    def cell(method, scale, key, fmt):
+        values = axis.get((method, scale), {}).get(key, [])
+        return fmt % statistics.mean(values) if values else "--"
+
+    lines = ["", "## IMU degradation axis", "",
+        "Command tracking as the inertial unit degrades. 1x is the nominal model in",
+        "`distillation/imu.py` -- gyro white noise, a per-episode gyro bias, an attitude",
+        "tilt, and up to two steps of staleness -- and it is the scale the recorded",
+        "`set_imu_noise` arm trained against, not a level chosen here. `+ DR` arms were",
+        "trained against that same 1x model; the others saw a clean IMU.",
+        "",
+        "JOSE and the joint-only student read no inertial channels, so their rows are flat",
+        "by construction. They are measured anyway rather than asserted.",
+        ""]
+    header = "| arm | " + " | ".join(f"{s:g}x" for s in AXIS_SCALES) + " | vs JOSE at 4x |"
+    lines += [header, "|---" * (len(AXIS_SCALES) + 2) + "|"]
+    base = axis.get(("jose", 4.0), {}).get("track", [])
+    base = statistics.mean(base) if base else None
+    for method, label in AXIS_ARMS:
+        cells = [cell(method, s, "track", "%.4f") for s in AXIS_SCALES]
+        far = axis.get((method, 4.0), {}).get("track", [])
+        delta = ("%+.0f%%" % (100 * (statistics.mean(far) - base) / base)
+                 if far and base else "--")
+        lines.append(f"| {label} | " + " | ".join(cells) + f" | {delta} |")
+
+    lines += ["", "Grid survival on the same rollouts.", "",
+              "| arm | " + " | ".join(f"{s:g}x" for s in AXIS_SCALES) + " |",
+              "|---" * (len(AXIS_SCALES) + 1) + "|"]
+    for method, label in AXIS_ARMS:
+        cells = [cell(method, s, "surv", "%.3f") for s in AXIS_SCALES]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=ROOT / "logs/jose_g1/training_imu_study/report.md")
@@ -258,7 +350,23 @@ def main() -> int:
 
     blocks = [
         ("Closed-loop control", [
-            ("Survival", "survival", 4), ("Ep. len.", "ep_len", 1),
+            # Two rollouts, not one. Everything here except `Ep. len.` comes from
+            # the command grid: 15 held commands, one second to settle and four to
+            # measure, scored by `estimator/locomotion.py:summarize`. `Ep. len.`
+            # comes from the episode evaluation -- 200 episodes of up to 1000
+            # steps, with the task's own sampler re-drawing the command mid-episode.
+            #
+            # So `Survival` 1.0000 beside an `Ep. len.` under 1000 is not a
+            # contradiction: the policy held every grid command through a four
+            # second window and still lost one episode out of 600 in a rollout
+            # five times longer that kept changing what it asked for.
+            #
+            # The combination that IS impossible is a full `Ep. len.` beside a
+            # `Survival` of 0.0000, and it is worth recognising: that is what a
+            # broken grid evaluation looks like, and it is how the frozen-IMU-cache
+            # bug in train_set_baseline.py was found.
+            ("Surv. (%) [as Table I(b)]", "surv_ep", 2),
+            ("Grid survival", "survival", 4), ("Ep. len.", "ep_len", 1),
             ("Track err", "track", 4), ("Δ teacher", "_delta", 4),
             ("vx", "track_vx", 4), ("vy", "track_vy", 4), ("yaw", "track_yaw", 4),
             ("Falls", "falls", 1),
@@ -287,9 +395,30 @@ def main() -> int:
         ]),
     ]
 
+    #: Printed under a block heading. Only where a reader has a real chance of
+    #: reading two rows as one measurement.
+    BLOCK_NOTES = {
+        "Closed-loop control":
+            "`Ep. len.` is the only row here from the episode evaluation: 200 "
+            "episodes of up to 1000 steps, with the task's sampler re-drawing the "
+            "command mid-episode. Every other row comes from the command grid -- "
+            "15 held commands, one second to settle and four to measure.\n\n"
+            "`Grid survival` is deliberately not the paper's `Surv. (%)`. Table I(b) "
+            "reports `100 - death_rate` from the episode evaluation; this row is "
+            "`grid_survival_rate`, the fraction of environments that hold a command "
+            "through its four-second measurement window. JOSE reads 99.2 there and "
+            "1.0000 here, and both are correct: it never lost a grid command and "
+            "lost one episode in 600. Both are given, named apart, because one name "
+            "for two quantities is how a reader concludes the numbers disagree. "
+            "`Surv. (%) [as Table I(b)]` is the paper's definition and reproduces "
+            "its JOSE cell exactly (99.17 -> 99.2).",
+    }
+
     for title, rows in blocks:
-        lines += ["", f"## {title}", "",
-                  "| metric | " + " | ".join(ARMS) + " |",
+        lines += ["", f"## {title}", ""]
+        if title in BLOCK_NOTES:
+            lines += [BLOCK_NOTES[title], ""]
+        lines += ["| metric | " + " | ".join(ARMS) + " |",
                   "|---" * (len(ARMS) + 1) + "|"]
         for label, key, digits in rows:
             cells = []
@@ -328,6 +457,8 @@ def main() -> int:
         "own training set. Read the DAgger effect down each family instead -- JOSE against",
         "JOSE (K=0), SET against SET+DAgger.",
     ]
+
+    lines += imu_axis_block(imu_axis_rows())
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -150,15 +150,47 @@ def test_no_two_arms_share_a_directory():
 
 
 def test_resolve_separates_hardened_from_unhardened_paths():
-    study, set_study = Path("/study"), Path("/set")
+    study, set_study, imu_study = Path("/study"), Path("/set"), Path("/imu")
     seen = set()
     for method in registry.METHOD_SPECS:
-        kind, path = registry.resolve(method, study, set_study, 42)
+        kind, path = registry.resolve(method, study, set_study, 42, imu_study=imu_study)
         if path is None:
             assert kind == "teacher"
             continue
         assert path not in seen, f"{method} collides with an earlier arm"
         seen.add(path)
+
+
+def test_resolve_skips_the_imu_study_arms_when_it_is_not_given():
+    """Same contract as SET: a study that was not supplied yields no checkpoint.
+
+    The sweep prints and skips those arms rather than failing, so an axis can be
+    measured before the training-protocol study exists.
+    """
+    for method in ("jose_imu", "jose_imu_dr", "set_dagger", "set_dagger_dr"):
+        kind, path = registry.resolve(method, Path("/study"), Path("/set"), 42)
+        assert path is None
+        assert kind in ("estimator_imu", "set_dagger")
+
+
+def test_imu_study_arms_resolve_to_their_flat_layout():
+    imu_study = Path("/imu")
+    kind, path = registry.resolve(
+        "jose_imu", Path("/study"), Path("/set"), 43, imu_study=imu_study
+    )
+    assert kind == "estimator_imu"
+    assert path == imu_study / "jose_imu" / "seed_43" / "best_estimator.pt"
+    kind, path = registry.resolve(
+        "set_dagger_dr", Path("/study"), Path("/set"), 44, imu_study=imu_study
+    )
+    assert kind == "set_dagger"
+    assert path == imu_study / "set_dagger_dr" / "seed_44" / "set_estimator.pt"
+
+
+def test_every_new_imu_axis_arm_is_on_the_imu_axis():
+    """The four cells exist to be swept; one defined but unlisted is one nobody runs."""
+    for method in ("jose_imu", "jose_imu_dr", "set_dagger", "set_dagger_dr"):
+        assert method in registry.AXIS_METHODS["imu"]
 
 
 def test_resolve_uses_the_right_filename_per_loader():
@@ -198,3 +230,92 @@ def test_corruptor_reset_takes_indices_not_a_boolean_mask():
             if re.search(r"corruptor\.reset\(", line) and "reset_ids(" not in line:
                 offenders.append(f"{name}: {line.strip()}")
     assert not offenders, "reset called with an unconverted mask:\n  " + "\n  ".join(offenders)
+
+
+class _FakeSensorEnv:
+    """Minimal stand-in for the walk estimator env's sensor accessor."""
+
+    N = 8
+
+    def get_distillation_sensor_state(self):
+        return {
+            "angular_velocity": torch.full((self.N, 3), 0.5),
+            "projected_gravity": torch.tensor([[0.0, 0.0, -1.0]]).repeat(self.N, 1),
+            "joint_position": torch.full((self.N, 29), 0.25),
+            "joint_velocity": torch.full((self.N, 29), 0.75),
+        }
+
+
+def _corruptor(scale):
+    from jose.distillation.imu import SensorCorruptionCfg, SensorCorruptor
+    from jose.robustness.noise import scaled_imu_cfg
+
+    return SensorCorruptor(_FakeSensorEnv.N, "cpu", scaled_imu_cfg(SensorCorruptionCfg(), scale))
+
+
+def test_imu_noise_leaves_the_joint_channels_alone():
+    """The two axes must stay separable.
+
+    ``get_distillation_sensor_state`` carries joints as well as inertials, and
+    the encoder axis degrades the joints through the same dict. If the IMU patch
+    touched them too, every point on the IMU axis would be a mixture of both
+    faults and neither curve would mean what its label says.
+    """
+    from jose.robustness.noise import patch_imu_noise
+
+    env = _FakeSensorEnv()
+    clean = env.get_distillation_sensor_state()
+    patch_imu_noise(env, _corruptor(1.0))
+    noisy = env.get_distillation_sensor_state()
+
+    assert not torch.equal(clean["angular_velocity"], noisy["angular_velocity"])
+    assert not torch.equal(clean["projected_gravity"], noisy["projected_gravity"])
+    assert torch.equal(clean["joint_position"], noisy["joint_position"])
+    assert torch.equal(clean["joint_velocity"], noisy["joint_velocity"])
+
+
+def test_imu_noise_keeps_gravity_a_direction():
+    """Projected gravity is a unit vector; a tilt that changed its length would
+    hand the estimator a magnitude cue that no attitude error produces."""
+    from jose.robustness.noise import patch_imu_noise
+
+    env = _FakeSensorEnv()
+    patch_imu_noise(env, _corruptor(4.0))
+    gravity = env.get_distillation_sensor_state()["projected_gravity"]
+    assert torch.allclose(gravity.norm(dim=-1), torch.ones(_FakeSensorEnv.N), atol=1e-5)
+
+
+def test_imu_noise_at_zero_scale_does_not_patch_at_all():
+    """0x has to be the *same* code path as an un-instrumented run, not a
+    corruptor that happens to add zero -- otherwise the 0x column of the axis is
+    not the number Table I reports."""
+    from jose.robustness.noise import patch_imu_noise
+
+    env = _FakeSensorEnv()
+    assert patch_imu_noise(env, _corruptor(0.0)) is None
+    assert patch_imu_noise(env, None) is None
+
+
+def test_imu_corruptor_redraws_only_the_environments_that_reset():
+    """The bias is per-episode. Resetting every environment on any death would
+    change the fault under robots that are still running."""
+    corruptor = _corruptor(1.0)
+    before = corruptor.bias.clone()
+    corruptor.reset(torch.tensor([0, 1, 2]))
+    assert not torch.equal(before[:3], corruptor.bias[:3])
+    assert torch.equal(before[3:], corruptor.bias[3:])
+
+
+def test_install_imu_noise_restores_the_accessor():
+    """Behaviour, not identity: attribute access builds a fresh bound method each
+    time, so `is` would compare two wrappers of the same function and fail on a
+    correct restore. What matters is that the sweep hands the environment back
+    clean, or the next method measured inherits the previous one's fault.
+    """
+    from jose.robustness.noise import install_imu_noise
+
+    env = _FakeSensorEnv()
+    clean = env.get_distillation_sensor_state()["angular_velocity"]
+    with install_imu_noise(env, _corruptor(1.0)):
+        assert not torch.equal(env.get_distillation_sensor_state()["angular_velocity"], clean)
+    assert torch.equal(env.get_distillation_sensor_state()["angular_velocity"], clean)

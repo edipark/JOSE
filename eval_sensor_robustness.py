@@ -66,6 +66,11 @@ parser.add_argument(
     help="SET study directory for this task, e.g. <set output>/<run>/locomotion. "
     "Omit to skip SET.",
 )
+parser.add_argument(
+    "--imu-study", default=None,
+    help="Training-protocol x IMU study directory, holding jose_imu/seed_N and "
+    "set_dagger/seed_N. Omit to skip those arms.",
+)
 parser.add_argument("--teacher-checkpoint", required=True)
 parser.add_argument("--task", default="Isaac-G1-PPO-Walk-Estimator-JOSE-v0")
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
@@ -105,11 +110,14 @@ import isaaclab_tasks  # noqa: F401, E402
 from jose.distillation.command_eval import evaluate_student_command_grid  # noqa: E402
 from jose.estimator.adapters import make_policy_adapter  # noqa: E402
 from jose.robustness.methods import (  # noqa: E402
-    load_jose, load_set, load_student, load_teacher,
+    load_jose, load_jose_imu, load_set, load_student, load_teacher,
 )
+from jose.distillation.command_eval import reset_ids  # noqa: E402
+from jose.distillation.imu import SensorCorruptionCfg, SensorCorruptor  # noqa: E402
 from jose.robustness.registry import AXIS_METHODS, resolve  # noqa: E402
 from jose.robustness.noise import (  # noqa: E402
     EncoderNoiseCfg, apply_encoder_noise_cfg, install_encoder_noise,
+    install_imu_noise, scaled_imu_cfg,
 )
 from jose.teacher_setup import build_env_and_teacher  # noqa: E402
 
@@ -118,6 +126,7 @@ from jose.teacher_setup import build_env_and_teacher  # noqa: E402
 def main(env_cfg, agent_cfg):
     study = Path(args_cli.study).resolve()
     set_study = Path(args_cli.set_study).resolve() if args_cli.set_study else None
+    imu_study = Path(args_cli.imu_study).resolve() if args_cli.imu_study else None
     out = Path(args_cli.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,15 +167,24 @@ def main(env_cfg, agent_cfg):
         with install_encoder_noise(core, encoder_cfg) as encoder_corruptor:
             for method in methods:
                 for seed in args_cli.seeds:
-                    kind, checkpoint = resolve(method, study, set_study, seed)
+                    kind, checkpoint = resolve(
+                        method, study, set_study, seed, imu_study=imu_study
+                    )
                     if kind != "teacher" and (checkpoint is None or not checkpoint.is_file()):
                         print(f"  {method} seed {seed}: no checkpoint at {checkpoint}", flush=True)
                         continue
                     adapter = base_adapter
-                    if kind in ("set", "set_enc"):
+                    if kind in ("set", "set_enc", "set_dagger"):
                         from jose.set_baseline.adapter import SETPolicyAdapter
 
                         adapter = SETPolicyAdapter(base_adapter)
+                    elif kind == "estimator_imu":
+                        # A second adapter on the same environment, built with the
+                        # inertial channels switched on so ``input_dim`` is 64 and
+                        # not 58. Built per method rather than alongside
+                        # ``base_adapter`` so an arm that never runs never widens
+                        # anything.
+                        adapter = make_policy_adapter(args_cli.adapter, env, "all", use_imu=True)
 
                     if kind == "teacher":
                         act, on_step, info = load_teacher(adapter, teacher_agent)
@@ -174,7 +192,11 @@ def main(env_cfg, agent_cfg):
                         act, on_step, info = load_jose(
                             adapter, teacher_agent, checkpoint, device, args_cli.num_envs
                         )
-                    elif kind in ("set", "set_enc"):
+                    elif kind == "estimator_imu":
+                        act, on_step, info = load_jose_imu(
+                            adapter, teacher_agent, checkpoint, device, args_cli.num_envs
+                        )
+                    elif kind in ("set", "set_enc", "set_dagger"):
                         act, on_step, info = load_set(
                             adapter, teacher_agent, checkpoint, device, args_cli.num_envs,
                             imu_scale,
@@ -184,15 +206,30 @@ def main(env_cfg, agent_cfg):
                             core, checkpoint, device, args_cli.num_envs, imu_scale
                         )
 
-                    def stepped(dones, _on_step=on_step):
+                    # Only the JOSE+IMU arms are degraded from here. SET builds
+                    # its own corruptor inside ``load_set``, and the distillation
+                    # students get theirs in ``load_student``; adding a sweep-wide
+                    # install would hand those two methods a second, independently
+                    # drawn bias on top of the one they already carry.
+                    imu_corruptor = None
+                    if kind == "estimator_imu" and imu_scale > 0.0:
+                        imu_corruptor = SensorCorruptor(
+                            args_cli.num_envs, device,
+                            scaled_imu_cfg(SensorCorruptionCfg(), imu_scale),
+                        )
+
+                    def stepped(dones, _on_step=on_step, _imu=imu_corruptor):
                         _on_step(dones)
                         encoder_corruptor.reset(dones)
+                        if _imu is not None and dones is not None and dones.any():
+                            _imu.reset(reset_ids(dones))
 
-                    metrics = evaluate_student_command_grid(
-                        env, adapter, act, stepped,
-                        settle_s=args_cli.grid_settle_s, measure_s=args_cli.grid_measure_s,
-                        seed=seed,
-                    )
+                    with install_imu_noise(core, imu_corruptor):
+                        metrics = evaluate_student_command_grid(
+                            env, adapter, act, stepped,
+                            settle_s=args_cli.grid_settle_s, measure_s=args_cli.grid_measure_s,
+                            seed=seed,
+                        )
                     row = {
                         "axis": args_cli.axis,
                         "scale": args_cli.scale,

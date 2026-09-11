@@ -312,3 +312,61 @@ def test_reset_ids_converts_a_boolean_mask_to_indices():
     assert ids.tolist() == [0, 2] and len(ids) == 2
     assert reset_ids(None) is None
     assert reset_ids(torch.tensor([1, 2])).tolist() == [1, 2]
+
+
+def _nested_function(path, outer, inner):
+    """Return the AST of a function defined inside another, by name.
+
+    Parsed rather than imported: train_set_baseline.py pulls in isaaclab at
+    module scope, which needs a live Omniverse app. Parsed rather than grepped
+    because a substring search matches the comment that explains the call as
+    readily as the call itself -- which is how a guard like this quietly stops
+    guarding anything.
+    """
+    import ast
+
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == outer:
+            for child in ast.walk(node):
+                if isinstance(child, ast.FunctionDef) and child.name == inner:
+                    return child
+    raise AssertionError(f"{inner} not found inside {outer} in {path}")
+
+
+def _attribute_calls(node):
+    import ast
+
+    return {
+        f"{ast.unparse(c.func.value)}.{c.func.attr}"
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+    }
+
+
+def test_command_grid_on_step_drops_the_cached_imu_read():
+    """The evaluation callback must clear the adapter's one-per-step sensor cache.
+
+    SETPolicyAdapter caches a single *corrupted* IMU draw so that
+    ``estimator_input`` and ``pass_through_values`` share one measurement instead
+    of advancing the latency ring twice. Nothing refills it: a caller that never
+    invalidates keeps step 0's reading for the whole evaluation, so with a
+    corruptor installed the policy walks believing it is not rotating and that
+    gravity points where it did at t=0.
+
+    That is not hypothetical. Every recorded ``set_imu_noise`` seed reports
+    ``grid_survival_rate`` 0.0000 with ~3000 falls while its episode evaluator --
+    which invalidates inside its own loop -- reports 998 of 1000 steps for the
+    same weights. Two evaluators of one policy cannot both be right, and the
+    disagreement is the signature of this bug.
+    """
+    on_step = _nested_function("train_set_baseline.py", "main", "on_step")
+    calls = _attribute_calls(on_step)
+    assert "adapter.invalidate_imu" in calls, (
+        "on_step must call adapter.invalidate_imu(); without it the command-grid "
+        "evaluation of any --imu-noise-scale run reads a frozen sensor"
+    )
+    assert "imu_corruptor.reset" in calls, (
+        "on_step must re-draw the per-episode gyro bias for environments that "
+        "reset; one fixed offset for a whole run is an easier problem than deployment"
+    )

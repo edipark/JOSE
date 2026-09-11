@@ -31,6 +31,13 @@ METHOD_SPECS: dict[str, tuple[str, str | None]] = {
     "set": ("set", "set"),
     "set_enc": ("set_enc", "set_encoder_noise"),
     "set_imu_dr": ("set", "set_imu_noise"),
+    # The two cells the training-protocol x IMU study added. They do not live
+    # under a method_comparison ``methods/`` tree -- they are their own study --
+    # so ``resolve`` reads them from ``imu_study`` instead. See the note there.
+    "jose_imu": ("estimator_imu", "jose_imu"),
+    "jose_imu_dr": ("estimator_imu", "jose_imu_dr"),
+    "set_dagger": ("set_dagger", "set_dagger"),
+    "set_dagger_dr": ("set_dagger", "set_dagger_dr"),
 }
 
 #: Arms that saw noise during training, paired with the arm that did not.
@@ -43,6 +50,8 @@ RANDOMIZATION_PAIRS: dict[str, str] = {
     "set_enc": "set",
     "imu_dr": "imu_clean",
     "set_imu_dr": "set",
+    "jose_imu_dr": "jose_imu",
+    "set_dagger_dr": "set_dagger",
 }
 
 #: What each axis can actually move.
@@ -63,7 +72,18 @@ RANDOMIZATION_PAIRS: dict[str, str] = {
 #: SET included: hardening some arms and not others would show which arm got the
 #: treatment rather than which method tolerates bad encoders.
 AXIS_METHODS: dict[str, tuple[str, ...]] = {
-    "imu": ("teacher", "jose", "joint_only", "imu_clean", "set", "imu_dr", "set_imu_dr"),
+    "imu": (
+        "teacher", "jose", "joint_only", "imu_clean", "set", "imu_dr", "set_imu_dr",
+        # JOSE+IMU is the first arm on this axis that beat joint-only JOSE in the
+        # clean condition (0.0481 against 0.0499), so unlike every earlier IMU
+        # method its curve has somewhere to fall from: the scale at which it
+        # crosses JOSE's flat line is the price of reading an inertial unit.
+        # SET+DAgger is here because SET's pass-through is an *architecture*
+        # choice whose cost only exists under noise -- six sensor dimensions go
+        # into the teacher's observation unfiltered, where JOSE+IMU regresses
+        # them. Clean evaluation cannot see that difference at all.
+        "jose_imu", "jose_imu_dr", "set_dagger", "set_dagger_dr",
+    ),
     "encoder": (
         "teacher",
         "jose", "jose_enc",
@@ -79,18 +99,32 @@ CHECKPOINT_NAMES = {
     "student": "checkpoints/student_best_eval.pt",
     "set": "set_estimator.pt",
     "set_enc": "set_estimator.pt",
+    "estimator_imu": "best_estimator.pt",
+    "set_dagger": "set_estimator.pt",
 }
 
 
 def resolve(
-    method: str, study: Path, set_study: Path | None, seed: int, context: int = 20, window: int = 25
+    method: str, study: Path, set_study: Path | None, seed: int, context: int = 20, window: int = 25,
+    imu_study: Path | None = None,
 ) -> tuple[str, Path | None]:
-    """``(loader kind, checkpoint path)``. ``None`` for the teacher, or no SET study."""
+    """``(loader kind, checkpoint path)``. ``None`` for the teacher, or a missing study.
+
+    ``imu_study`` is the training-protocol x IMU study directory. Its arms are
+    laid out ``<imu_study>/<slug>/seed_N/`` -- flat, because that study varies
+    neither window nor joint set nor context, and mirroring the deeper
+    ``methods/window_25/joints_all/`` path would assert three constants as if
+    they were choices.
+    """
     if method not in METHOD_SPECS:
         raise KeyError(f"Unknown method {method!r}; choose from {sorted(METHOD_SPECS)}")
     kind, slug = METHOD_SPECS[method]
     if kind == "teacher":
         return kind, None
+    if kind in ("estimator_imu", "set_dagger"):
+        if imu_study is None:
+            return kind, None
+        return kind, imu_study / slug / f"seed_{seed}" / CHECKPOINT_NAMES[kind]
     if kind in ("set", "set_enc"):
         if set_study is None:
             return kind, None

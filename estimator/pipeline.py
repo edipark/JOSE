@@ -15,6 +15,8 @@ import torch
 import numpy as np
 from torch import nn
 
+from jose.distillation.command_eval import reset_ids
+
 from ..schema import JOINT_PRESETS, SCHEMA_VERSION
 from ..skrl_compat import force_skrl_isaaclab_reset, require_skrl_2
 from .adapters import PolicyAdapter
@@ -230,6 +232,15 @@ def collect_rollout(
             lengths[done] = 0.0
             history.reset(done)
             previous_action[done] = 0.0
+            # Re-draw the IMU fault for the environments that just reset. The
+            # model in distillation/imu.py holds a per-episode gyro bias and a
+            # latency ring; carrying them across a reset would hand the estimator
+            # one fixed offset for the whole run instead of a fresh one each
+            # episode, which is a far easier problem than deployment.
+            # `getattr` because only the randomized JOSE+IMU arm carries one.
+            imu_corruptor = getattr(adapter, "imu_corruptor", None)
+            if imu_corruptor is not None:
+                imu_corruptor.reset(reset_ids(done))
 
     dataset = RolloutDataset(*(torch.cat(items) for items in (histories, targets, frames, teacher_actions)))
     stats = {
@@ -325,6 +336,9 @@ def evaluate_estimator_closed_loop(
             lengths[done_ids] = 0.0
             history.reset(done)
             previous_action[done] = 0.0
+            imu_corruptor = getattr(adapter, "imu_corruptor", None)
+            if imu_corruptor is not None:
+                imu_corruptor.reset(reset_ids(done))
             if len(completed_lengths) >= episodes:
                 break
     if not completed_lengths:
@@ -422,8 +436,12 @@ def evaluate_locomotion_grid(
         return adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
 
     def on_step(dones):
-        if history is not None and dones.any():
-            history.reset(dones)
+        if dones is not None and dones.any():
+            if history is not None:
+                history.reset(dones)
+            imu_corruptor = getattr(adapter, "imu_corruptor", None)
+            if imu_corruptor is not None:
+                imu_corruptor.reset(reset_ids(dones))
 
     results = evaluator.run_all(act, on_step=on_step)
     metrics = summarize(results)

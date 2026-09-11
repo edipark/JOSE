@@ -94,7 +94,10 @@ import torch  # noqa: E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 import isaaclab_tasks  # noqa: F401, E402
 
-from jose.distillation.command_eval import evaluate_student_command_grid  # noqa: E402
+from jose.distillation.command_eval import (  # noqa: E402
+    evaluate_student_command_grid,
+    reset_ids,
+)
 from jose.estimator.adapters import make_policy_adapter  # noqa: E402
 from jose.estimator.pipeline import (  # noqa: E402
     HistoryBuffer,
@@ -194,8 +197,25 @@ def main(env_cfg, agent_cfg):
         return adapter.action(teacher_agent, adapter.inject_estimate(observations, estimate))
 
     def on_step(dones: torch.Tensor) -> None:
+        # Drop the cached sensor read every step, before anything reads the IMU
+        # again. The adapter caches one *corrupted* draw so that the step's two
+        # consumers -- `estimator_input` and `pass_through_values` -- share it
+        # rather than drawing two independent faults; the cost is that a caller
+        # which never invalidates reuses step 0's reading for the whole
+        # evaluation. With a corruptor installed that freezes angular velocity
+        # and projected gravity at their t=0 values, and the robot walks blind to
+        # its own rotation: the command grid reported 0.0 survival and a tracking
+        # error of 1.22 while `evaluate_set_closed_loop`, which does invalidate,
+        # reported 998 of 1000 steps for the same weights. The three recorded
+        # `set_imu_noise` seeds carry the same signature (grid survival 0.0000,
+        # ~3000 falls); they are not cited in the manuscript.
+        if imu_corruptor is not None:
+            adapter.invalidate_imu()
         history.reset(dones)
         estimator.reset(dones)
+        if imu_corruptor is not None and dones is not None and dones.any():
+            # Per-episode fault: a fresh gyro bias and latency for whoever reset.
+            imu_corruptor.reset(reset_ids(dones))
 
     def evaluate_all(current_dataset) -> dict:
         """Every number reported for the estimator as it stands right now.

@@ -228,3 +228,64 @@ def scaled_imu_cfg(base: SensorCorruptionCfg, scale: float) -> SensorCorruptionC
         gravity_tilt_std_rad=base.gravity_tilt_std_rad * scale,
         enabled=True,
     )
+
+
+def patch_imu_noise(core_env, corruptor):
+    """Install the degradation permanently; return the accessor it replaced.
+
+    Returns ``None`` when there is nothing to install, which is also what says
+    "nothing to restore". Use :func:`install_imu_noise` wherever the degraded
+    region has an end -- a sweep measures one method at one level and must hand
+    the environment back clean. Training has no such end: the process exists to
+    produce one randomized arm, and every read from here to the checkpoint should
+    see the same bad sensor, so the trainer patches once and never restores.
+    """
+    if corruptor is None or not corruptor.cfg.enabled:
+        return None
+
+    original_sensor_state = core_env.get_distillation_sensor_state
+
+    def noisy_sensor_state():
+        state = dict(original_sensor_state())
+        state["angular_velocity"], state["projected_gravity"] = corruptor(
+            state["angular_velocity"], state["projected_gravity"]
+        )
+        return state
+
+    core_env.get_distillation_sensor_state = noisy_sensor_state
+    return original_sensor_state
+
+
+@contextmanager
+def install_imu_noise(core_env, corruptor):
+    """Degrade the IMU channels of ``get_distillation_sensor_state``, for the block.
+
+    The mirror of :func:`install_encoder_noise`, and installed for the same
+    reason: on the environment, where no adapter can route around it. It touches
+    only ``angular_velocity`` and ``projected_gravity``, so it composes with
+    encoder noise -- enter this inside that block and the joints stay degraded
+    while the inertial channels degrade too.
+
+    Scope it to *one* method rather than wrapping the whole sweep. SET carries
+    its own corruptor on its adapter (``robustness.methods.load_set``), so a
+    sweep-wide install would corrupt SET twice, at two independently drawn biases,
+    and the number that came out would belong to no sensor model at all.
+
+    ``corruptor`` is called once per environment step because the JOSE+IMU
+    adapter reads the sensor state exactly once in ``estimator_input``. That
+    matters: the model in ``distillation/imu.py`` is stateful -- a per-episode
+    bias and a latency ring -- so a second read inside one step would advance the
+    ring twice and quietly halve the staleness being tested. SET solves the same
+    problem with a cached read it invalidates once per step; here the single read
+    is what makes the cache unnecessary.
+
+    A ``None`` corruptor, or a disabled config, yields without patching, so the
+    0x condition costs nothing and runs the identical code path as an
+    un-instrumented evaluation.
+    """
+    original_sensor_state = patch_imu_noise(core_env, corruptor)
+    try:
+        yield corruptor
+    finally:
+        if original_sensor_state is not None:
+            core_env.get_distillation_sensor_state = original_sensor_state

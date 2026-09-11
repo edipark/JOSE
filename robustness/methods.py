@@ -143,6 +143,42 @@ def load_jose(adapter, teacher_agent, path: Path, device, num_envs: int):
     return act, on_step, {"checkpoint": str(path), "window": window, "estimator": config["type"]}
 
 
+def load_jose_imu(adapter, teacher_agent, path: Path, device, num_envs: int):
+    """JOSE+IMU: the same estimator, reading six inertial channels as *input*.
+
+    Architecturally this is JOSE, not SET. It still regresses the whole nine
+    dimensional privileged target and injects the result; the inertial unit only
+    widens what it reads from 58 to 64. SET, by contrast, passes those same six
+    dimensions straight through into the teacher's observation and predicts base
+    linear velocity alone. On a clean IMU the two look similar and SET looks
+    slightly better for free; the difference is a *filtering* difference, and it
+    has nowhere to show itself until the sensor is degraded.
+
+    Degradation is not applied here. It is installed on the environment by
+    ``robustness.noise.install_imu_noise`` around the evaluation, so this loader
+    is identical at every noise level and nothing about the arm changes with the
+    axis except what the sensor reports.
+
+    The two assertions are the point of having a separate loader at all: a
+    checkpoint and an adapter that disagree about the IMU would load without
+    complaint and produce a plausible, meaningless curve -- the estimator would
+    read 64 numbers whose last six were whatever the ring happened to hold.
+    """
+    payload = torch.load(path, map_location=device, weights_only=False)
+    if not payload.get("imu_input", False):
+        raise ValueError(
+            f"{path} was not trained with --imu-input (checkpoint says "
+            f"imu_input={payload.get('imu_input')!r}); load it with load_jose instead"
+        )
+    if not getattr(adapter, "use_imu", False):
+        raise ValueError(
+            "load_jose_imu needs an adapter built with use_imu=True; got "
+            f"input_dim={adapter.input_dim}"
+        )
+    act, on_step, info = load_jose(adapter, teacher_agent, path, device, num_envs)
+    return act, on_step, {**info, "imu_input": True}
+
+
 def load_set(adapter, teacher_agent, path: Path, device, num_envs: int, imu_scale: float = 0.0):
     """The SET baseline: joints + IMU in, privileged state out.
 
