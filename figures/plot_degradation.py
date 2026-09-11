@@ -67,7 +67,7 @@ ROWS = (
         "track_lim": (0, 1.32),
         # The tallest bars in this row are on the left, so the key goes right.
         "legend_loc": "upper right",
-        "label_drop": -34,
+        "label_drop": -39,
     },
     {
         "axis": "imu",
@@ -86,7 +86,7 @@ ROWS = (
         # Here the tall bars are the randomized block on the right, so the key
         # goes left, over the two methods that read no IMU at all.
         "legend_loc": "upper left",
-        "label_drop": -27,
+        "label_drop": -32,
     },
 )
 
@@ -157,7 +157,7 @@ def panel(axis, row, sweeps, key, ylabel, ylim, show_labels, show_header) -> Non
                 # Nothing drawn and nothing implied: an absent arm must not read
                 # as a zero-height bar.
                 axis.text(x, ylim[0] + 0.05 * (ylim[1] - ylim[0]), "n/a", ha="center",
-                          fontsize=4.0, color="#9A9A9A", rotation=90)
+                          fontsize=5.0, color="#9A9A9A", rotation=90)
                 continue
             centre, error = measured
             axis.bar(x, centre, width, color=LEVEL_COLOURS[scale],
@@ -166,12 +166,12 @@ def panel(axis, row, sweeps, key, ylabel, ylim, show_labels, show_header) -> Non
                           capsize=1.0, capthick=0.4, zorder=4)
 
     axis.set_ylim(*ylim)
-    axis.set_ylabel(ylabel, fontsize=6.3, labelpad=1.5)
-    axis.tick_params(axis="y", labelsize=5.5, length=1.8, pad=0.8)
+    axis.set_ylabel(ylabel, fontsize=7.3, labelpad=1.5)
+    axis.tick_params(axis="y", labelsize=6.5, length=1.8, pad=0.8)
     axis.set_xlim(positions[0] - 0.7, positions[-1] + 0.7)
     axis.set_xticks(positions)
     if show_labels:
-        axis.set_xticklabels([label for _key, label in arms], rotation=90, fontsize=5.2)
+        axis.set_xticklabels([label for _key, label in arms], rotation=90, fontsize=6.2)
     else:
         axis.set_xticklabels([])
     axis.tick_params(axis="x", length=0, pad=1.5)
@@ -191,7 +191,7 @@ def panel(axis, row, sweeps, key, ylabel, ylim, show_labels, show_header) -> Non
             xy=((positions[split] + positions[-1]) / 2.0, 0),
             xytext=(0, row["label_drop"]), textcoords="offset points",
             xycoords=("data", "axes fraction"),
-            ha="center", va="top", fontsize=5.2, color="#4D4D4D",
+            ha="center", va="top", fontsize=6.2, color="#4D4D4D",
             annotation_clip=False,
         )
 
@@ -218,21 +218,22 @@ def plot(out: str, dpi: int) -> None:
             # which reads as a second typographic system beside the other two
             # results figures; the size comes from plot_window.py so it cannot
             # drift from them.
-            axis.set_title(f"({'abcd'[r * 2 + c]}) {row['title']}",
+            metric_title = "Survival" if key == "survival" else "RMSE"
+            axis.set_title(f"({'abcd'[r * 2 + c]}) {metric_title}({row['title']})",
                            fontsize=shared.TITLE_SIZE, pad=shared.TITLE_PAD,
-                           loc="left")
+                           loc="center")
 
         # One key per row: the rows ramp over different level sets, and a shared
         # key would list a level that half the figure never measured.
         axes[r][1].legend(
             handles=[Patch(facecolor=LEVEL_COLOURS[s], edgecolor=LEVEL_EDGE,
                            linewidth=0.4, label=LEVEL_LABELS[s]) for s in row["scales"]],
-            loc=row["legend_loc"], fontsize=5.0, frameon=False, handlelength=0.9,
+            loc=row["legend_loc"], fontsize=6.0, frameon=False, handlelength=0.9,
             handleheight=0.7, borderpad=0.1, labelspacing=0.25, borderaxespad=0.2,
         )
 
-    figure.subplots_adjust(left=0.092, right=0.999, top=0.968, bottom=0.118,
-                           wspace=0.26, hspace=0.70)
+    figure.subplots_adjust(left=0.092, right=0.970, top=0.968, bottom=0.170,
+                           wspace=0.26, hspace=0.82)
     figure.savefig(out, dpi=dpi)
     plt.close(figure)
     print(f"wrote {out}")
