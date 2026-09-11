@@ -182,4 +182,12 @@ echo "[4/4] SET baseline (~1 h)"
 "$JOSE_PY" run_set_baseline.py --case "$CASE" "$CKPT" --seeds $SEEDS \
     2>&1 | tee "$LOGS/set_baseline.log"
 
+# --- 5. tracking on Table I(b)'s protocol ---------------------------------
+# The rows above carry each trainer's own end-of-training grid, which runs the
+# distillation students with their IMU corruption on; Table I(b) measures
+# tracking with clean sensors through eval_sensor_robustness.py. Evaluation only.
+echo "[5/5] re-measuring tracking with clean sensors (~30 min)"
+JOSE_PY="$JOSE_PY" VARIANT="$VARIANT" SEEDS="$SEEDS" bash scripts/remeasure_terrain_tracking.sh \
+    2>&1 | tee "$LOGS/track_sweep0.log"
+
 echo "=== done. collect results with: VARIANT=$VARIANT bash scripts/collect_terrain_results.sh ==="

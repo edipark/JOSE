@@ -107,6 +107,9 @@ import torch  # noqa: E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 import isaaclab_tasks  # noqa: F401, E402
 
+# Registers the terrain and push task ids, so --task can name them. The study
+# runners get this through their bootstrap; this script is run directly.
+import jose.ppo_walk  # noqa: F401, E402
 from jose.distillation.command_eval import evaluate_student_command_grid  # noqa: E402
 from jose.estimator.adapters import make_policy_adapter  # noqa: E402
 from jose.robustness.methods import (  # noqa: E402
