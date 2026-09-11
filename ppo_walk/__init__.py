@@ -15,3 +15,6 @@ https://github.com/unitreerobotics/unitree_rl_lab
 # nothing else, registering by entry-point *string* exactly as
 # ``jose/__init__.py`` does, so no Isaac Lab module is pulled in at import time.
 from . import terrain_tasks  # noqa: F401,E402
+# The push-disturbed ids, kept out of ``terrain_tasks`` because that file is
+# hashed into the two terrain tuples. Same import-time guarantee as above.
+from . import push_tasks  # noqa: F401,E402

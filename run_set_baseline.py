@@ -194,7 +194,13 @@ def main() -> int:
         }
         if returncode == 0:
             row["metrics"] = _metrics(artifact)
-        else:
+        # Isaac Sim exits 0 after an uncaught Python exception, so a zero
+        # return code alone does not mean the job ran. A job that wrote no
+        # metrics is a failure -- and must be recorded as one, or a resume
+        # would skip it as complete (docs/TERRAIN_RUN_NOTES.md 2.1).
+        if not row.get("metrics"):
+            row["status"] = "failed"
+            row.pop("metrics", None)
             row["error"] = log.read_text(encoding="utf-8", errors="replace")[-4000:]
         with raw.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row) + "\n")

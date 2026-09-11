@@ -99,6 +99,14 @@ TASKS = {
         "ppo_walk",
         "rsl_rl_cfg_entry_point",
     ),
+    # The flat task (friction and mass fixed) with random base-velocity pushes
+    # of up to 0.5 m/s every 1-4 s. Definitions in ppo_walk/push_env_cfg.py, ids
+    # in ppo_walk/push_tasks.py.
+    "locomotion_push": (
+        "Isaac-G1-PPO-Walk-Push-Estimator-JOSE-v0",
+        "ppo_walk",
+        "rsl_rl_cfg_entry_point",
+    ),
 }
 
 TRAINING_IMPLEMENTATION = (
@@ -176,6 +184,20 @@ TASK_IMPLEMENTATION = {
         "ppo_walk/terrain_env_cfg.py",
         "ppo_walk/terrain_tasks.py",
         "ppo_walk/mdp/terrain_mdp.py",
+    ),
+    # Same construction as the terrain keys: the flat files it inherits, plus the
+    # two that define the pushes. ``ppo_walk/__init__.py`` is left out for the
+    # same reason the terrain keys leave it out -- it only imports registrations.
+    "locomotion_push": (
+        "__init__.py",
+        "ppo_walk/g1_asset.py",
+        "ppo_walk/walk_env_cfg.py",
+        "ppo_walk/walk_estimator_env_cfg.py",
+        "ppo_walk/walk_estimator_env.py",
+        "ppo_walk/agents/rsl_rl_ppo_cfg.py",
+        "ppo_walk/mdp/rewards.py",
+        "ppo_walk/push_env_cfg.py",
+        "ppo_walk/push_tasks.py",
     ),
 }
 

@@ -51,6 +51,7 @@ TASKS = {
     # same estimator interface -- only the environment they run in differs.
     "locomotion_friction": CATALOG_TASK_REGISTRY["locomotion_friction"][0],
     "locomotion_slope": CATALOG_TASK_REGISTRY["locomotion_slope"][0],
+    "locomotion_push": CATALOG_TASK_REGISTRY["locomotion_push"][0],
 }
 # Gym task id -> (estimator adapter kind, agent config entry point), so the
 # teacher/estimator/student commands below stay correct for a non-AMP task
@@ -407,7 +408,13 @@ def main() -> None:
             }
             if returncode == 0:
                 row["metrics"] = _metrics(artifact)
-            else:
+            # Isaac Sim exits 0 after an uncaught Python exception, so a zero
+            # return code alone does not mean the job ran. A job that wrote no
+            # metrics is a failure -- and must be recorded as one, or a resume
+            # would skip it as complete (docs/TERRAIN_RUN_NOTES.md 2.1).
+            if not row.get("metrics"):
+                row["status"] = "failed"
+                row.pop("metrics", None)
                 row["error"] = log.read_text(encoding="utf-8", errors="replace")[-4000:]
             with raws[task].open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row) + "\n")
